@@ -15,11 +15,17 @@ local function round(value: number): number
 	return math.floor(value / Controls.stepIncrement + 0.5) * Controls.stepIncrement
 end
 
+-- Set a step, snapped to the settings increment and kept within range.
+function Settings.set(name: "throttleStep" | "brakeStep", value: number)
+	if value ~= value then
+		return
+	end
+	Settings[name] = math.clamp(round(value), Controls.stepMin, Controls.stepMax)
+end
+
 -- Change a step by `increments` notches of the settings increment, kept within range.
 function Settings.adjust(name: "throttleStep" | "brakeStep", increments: number)
-	local current = Settings[name] :: number
-	local value = round(current + increments * Controls.stepIncrement)
-	Settings[name] = math.clamp(value, Controls.stepMin, Controls.stepMax)
+	Settings.set(name, (Settings[name] :: number) + increments * Controls.stepIncrement)
 end
 
 function Settings.invertScroll()

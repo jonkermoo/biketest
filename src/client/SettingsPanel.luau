@@ -1,10 +1,12 @@
 --!strict
--- Temporary settings panel, toggled with M. Rows of − / + buttons for wheel sensitivity and
--- a toggle for scroll direction. Shows the system cursor while open so the buttons are easy
--- to click.
+-- Temporary settings panel, toggled with M. Wheel sensitivity rows are a slider with − / +
+-- arrows either side; scroll direction is a toggle. Shows the system cursor while open so
+-- the controls are easy to use.
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
+local Controls = require(ReplicatedStorage.Shared.config.Controls)
 local Settings = require(script.Parent.Settings)
 
 local SettingsPanel = {}
@@ -18,6 +20,12 @@ local ACCENT = Color3.fromRGB(255, 140, 30)
 local gui: ScreenGui? = nil
 local refreshers: { () -> () } = {}
 local open = false
+
+local function refreshAll()
+	for _, refresh in refreshers do
+		refresh()
+	end
+end
 
 local function corner(parent: Instance, radius: number)
 	local c = Instance.new("UICorner")
@@ -49,9 +57,7 @@ local function button(parent: Instance, label: string, width: number, onClick: (
 	corner(b, 6)
 	b.Activated:Connect(function()
 		onClick()
-		for _, refresh in refreshers do
-			refresh()
-		end
+		refreshAll()
 	end)
 	return b
 end
@@ -69,26 +75,105 @@ local function row(list: Frame, order: number, title: string): Frame
 	return r
 end
 
-local function stepper(
-	list: Frame,
-	order: number,
-	title: string,
-	name: "throttleStep" | "brakeStep"
-)
-	local r = row(list, order, title)
+-- Title and value on top; below, [−] slider [+]. Drag the knob or click the track; the
+-- arrows nudge by one increment.
+local function slider(list: Frame, order: number, title: string, name: "throttleStep" | "brakeStep")
+	local r = Instance.new("Frame")
+	r.Name = title
+	r.LayoutOrder = order
+	r.Size = UDim2.new(1, 0, 0, 58)
+	r.BackgroundTransparency = 1
+	r.Parent = list
+
+	local label = text(r, title, 15, MUTED)
+	label.Size = UDim2.new(0.7, 0, 0, 20)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	local value = text(r, "", 16, TEXT)
+	value.Name = "Value"
+	value.AnchorPoint = Vector2.new(1, 0)
+	value.Position = UDim2.fromScale(1, 0)
+	value.Size = UDim2.fromOffset(60, 20)
+	value.TextXAlignment = Enum.TextXAlignment.Right
+
 	local minus = button(r, "−", 30, function()
 		Settings.adjust(name, -1)
 	end)
-	minus.Position = UDim2.new(1, -116, 0.5, -15)
-	local value = text(r, "", 16, TEXT)
-	value.Size = UDim2.fromOffset(52, 30)
-	value.Position = UDim2.new(1, -84, 0.5, -15)
+	minus.Name = "Minus"
+	minus.Position = UDim2.fromOffset(0, 26)
 	local plus = button(r, "+", 30, function()
 		Settings.adjust(name, 1)
 	end)
-	plus.Position = UDim2.new(1, -30, 0.5, -15)
+	plus.Name = "Plus"
+	plus.AnchorPoint = Vector2.new(1, 0)
+	plus.Position = UDim2.new(1, 0, 0, 26)
+
+	-- A tall invisible hit area makes the thin track easy to grab.
+	local hit = Instance.new("TextButton")
+	hit.Name = "Slider"
+	hit.Text = ""
+	hit.AutoButtonColor = false
+	hit.BackgroundTransparency = 1
+	hit.Position = UDim2.fromOffset(42, 26)
+	hit.Size = UDim2.new(1, -84, 0, 30)
+	hit.Parent = r
+
+	local track = Instance.new("Frame")
+	track.Name = "Track"
+	track.AnchorPoint = Vector2.new(0, 0.5)
+	track.Position = UDim2.fromScale(0, 0.5)
+	track.Size = UDim2.new(1, 0, 0, 6)
+	track.BackgroundColor3 = BUTTON
+	track.BorderSizePixel = 0
+	track.Parent = hit
+	corner(track, 3)
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.BackgroundColor3 = ACCENT
+	fill.BorderSizePixel = 0
+	fill.Parent = track
+	corner(fill, 3)
+
+	local knob = Instance.new("Frame")
+	knob.Name = "Knob"
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Size = UDim2.fromOffset(16, 16)
+	knob.BackgroundColor3 = TEXT
+	knob.BorderSizePixel = 0
+	knob.Parent = track
+	corner(knob, 8)
+
+	local range = Controls.stepMax - Controls.stepMin
+	local function setFromScreenX(x: number)
+		local fraction = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+		Settings.set(name, Controls.stepMin + fraction * range)
+		refreshAll()
+	end
+
+	local dragging = false
+	hit.InputBegan:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			setFromScreenX(input.Position.X)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input: InputObject)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			setFromScreenX(input.Position.X)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+
 	table.insert(refreshers, function()
-		value.Text = string.format("%d%%", math.floor((Settings[name] :: number) * 100 + 0.5))
+		local current = Settings[name] :: number
+		local fraction = math.clamp((current - Controls.stepMin) / range, 0, 1)
+		fill.Size = UDim2.fromScale(fraction, 1)
+		knob.Position = UDim2.fromScale(fraction, 0.5)
+		value.Text = string.format("%d%%", math.floor(current * 100 + 0.5))
 	end)
 end
 
@@ -117,7 +202,7 @@ local function build()
 	panel.Name = "Panel"
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
-	panel.Size = UDim2.fromOffset(340, 236)
+	panel.Size = UDim2.fromOffset(340, 290)
 	panel.BackgroundColor3 = PANEL
 	panel.BackgroundTransparency = 0.1
 	panel.Parent = screen
@@ -149,8 +234,8 @@ local function build()
 	header.Size = UDim2.new(1, 0, 0, 24)
 	header.TextXAlignment = Enum.TextXAlignment.Left
 
-	stepper(list, 1, "Throttle per notch", "throttleStep")
-	stepper(list, 2, "Brake per notch", "brakeStep")
+	slider(list, 1, "Throttle per notch", "throttleStep")
+	slider(list, 2, "Brake per notch", "brakeStep")
 	toggle(list, 3, "Invert scroll")
 
 	local hint = text(list, "Press M to close", 13, MUTED)
@@ -160,9 +245,7 @@ local function build()
 
 	screen.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 	gui = screen
-	for _, refresh in refreshers do
-		refresh()
-	end
+	refreshAll()
 end
 
 function SettingsPanel.isOpen(): boolean
