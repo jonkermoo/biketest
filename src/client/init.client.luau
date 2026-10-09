@@ -46,11 +46,9 @@ groundParams.FilterType = Enum.RaycastFilterType.Exclude
 
 -- The bike's position is owned here, not read back from physics each frame.
 local position = Vector3.zero
-local hold: AlignPosition? = nil
-local turn: AlignOrientation? = nil
 local lookTarget = { x = 0, z = 0 }
--- Twist-grip throttle set by the scroll wheel; stays where the rider leaves it.
-local throttle = 0
+-- Mouse-wheel lever: -1 full brake, 0 closed, +1 full throttle. Stays where it is left.
+local lever = 0
 
 local function groundHeight(at: Vector3, fallback: number): number
 	local hit = Workspace:Raycast(at + Vector3.new(0, 6, 0), Vector3.new(0, -40, 0), groundParams)
@@ -59,13 +57,13 @@ end
 
 local function attach(model: Model)
 	bike = model
-	local root = model.PrimaryPart :: BasePart
-	hold = root:FindFirstChild("Hold") :: AlignPosition?
-	turn = root:FindFirstChild("Turn") :: AlignOrientation?
-	position = if hold then hold.Position else model:GetPivot().Position
-	local _, yaw, _ = (if turn then turn.CFrame else model:GetPivot()):ToEulerAnglesYXZ()
+	-- Start from the server's spawn pose, which physics cannot have disturbed.
+	local spawnPose = model:GetAttribute("SpawnCFrame")
+	local start: CFrame = if typeof(spawnPose) == "CFrame" then spawnPose else model:GetPivot()
+	position = start.Position
+	local _, yaw, _ = start:ToEulerAnglesYXZ()
 	state = BikeDynamics.newState(yaw)
-	throttle = 0
+	lever = 0
 	local ignore = { model, player.Character :: Model } :: { Instance }
 	groundParams.FilterDescendantsInstances = ignore
 	LookView.enable(ignore)
@@ -75,7 +73,8 @@ end
 -- Steering demand: A/D override with assisted keyboard steering; otherwise steer to the
 -- world marker, uncapped by the assist.
 local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
-	local brake = key(Enum.KeyCode.S)
+	local throttle, leverBrake = Throttle.split(lever)
+	local brake = math.max(leverBrake, key(Enum.KeyCode.S)) -- S is a full-brake fallback
 	local steer = key(Enum.KeyCode.D) - key(Enum.KeyCode.A)
 	if steer ~= 0 then
 		return { throttle = throttle, brake = brake, steer = steer }
@@ -125,9 +124,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	end
 	state, events = BikeDynamics.step(state, input, Bike, dt)
 	if state.fallen then
-		throttle = 0 -- the engine cuts when the bike goes down
+		lever = 0 -- the engine cuts and the rider lets go when the bike goes down
 	end
-	ThrottleHud.update(throttle, state.speed)
+	ThrottleHud.update(input.throttle, input.brake, state.speed)
 	if events.lostGrip then
 		print(
 			string.format(
@@ -147,11 +146,14 @@ RunService.Heartbeat:Connect(function(dt: number)
 	local pitch = math.atan2(frontY - rearY, Geometry.halfWheelbase * 2)
 	position = Vector3.new(pos.X, (frontY + rearY) / 2, pos.Z)
 
-	if hold and turn then
-		hold.Position = position
-		turn.CFrame = yaw * CFrame.Angles(pitch, 0, 0) * CFrame.Angles(0, 0, -state.lean)
-	end
-	LookView.updateCamera(position, yaw, pitch, state.lean)
+	-- Place the bike exactly, every frame. Velocity is set too so physics and replication
+	-- interpolate smoothly between frames. (Rigid align constraints were tried and did not
+	-- hold the bike: it fell 2,000+ studs behind its target. See traps.md.)
+	bike:PivotTo(
+		CFrame.new(position) * yaw * CFrame.Angles(pitch, 0, 0) * CFrame.Angles(0, 0, -state.lean)
+	)
+	root.AssemblyLinearVelocity = forward * state.speed
+	root.AssemblyAngularVelocity = Vector3.zero
 
 	-- Wheels roll with speed (visual only).
 	wheelSpin -= state.speed / Geometry.wheelRadius * dt
@@ -168,7 +170,17 @@ RunService.Heartbeat:Connect(function(dt: number)
 	bike:SetAttribute("GripUsed", events.gripUsed)
 	bike:SetAttribute("Fallen", state.fallen)
 	bike:SetAttribute("LookCurvature", input.curvature or 0)
-	bike:SetAttribute("Throttle", throttle)
+	bike:SetAttribute("Throttle", input.throttle)
+	bike:SetAttribute("Brake", input.brake)
+end)
+
+-- Camera every rendered frame, from the bike as drawn (after physics), so the head stays
+-- fixed on the bike at any speed.
+RunService:BindToRenderStep("BikeCamera", Enum.RenderPriority.Camera.Value + 1, function()
+	local root = bike and bike.PrimaryPart
+	if root then
+		LookView.updateCamera(root.CFrame, state.lean)
+	end
 end)
 
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
@@ -177,12 +189,14 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 	end
 end)
 
--- Scroll down twists the grip open, scroll up rolls it closed.
+-- The wheel moves one lever: toward "faster" releases the brake then opens the throttle;
+-- toward "slower" closes the throttle then brakes. Direction is set in config/Controls.
 UserInputService.InputChanged:Connect(function(input: InputObject, processed: boolean)
 	if processed or input.UserInputType ~= Enum.UserInputType.MouseWheel then
 		return
 	end
 	if bike and not state.fallen then
-		throttle = Throttle.fromScroll(throttle, input.Position.Z, Controls.throttleStep)
+		local notches = input.Position.Z * Controls.scrollFasterSign
+		lever = Throttle.fromScroll(lever, notches, Controls.throttleStep)
 	end
 end)

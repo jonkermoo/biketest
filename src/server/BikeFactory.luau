@@ -28,26 +28,9 @@ function BikeFactory.build(groundCFrame: CFrame): Model
 	root.Parent = model
 	model.PrimaryPart = root
 
-	-- Rigid align constraints hold the bike exactly where the riding model says. The owning
-	-- client updates their targets every frame. Moving the parts directly instead let
-	-- stray physics forces accumulate (the bike drifted hundreds of studs at zero speed).
-	local anchor = Instance.new("Attachment")
-	anchor.Name = "Anchor"
-	anchor.Parent = root
-	local hold = Instance.new("AlignPosition")
-	hold.Name = "Hold"
-	hold.Mode = Enum.PositionAlignmentMode.OneAttachment
-	hold.Attachment0 = anchor
-	hold.RigidityEnabled = true
-	hold.Position = groundCFrame.Position
-	hold.Parent = root
-	local turn = Instance.new("AlignOrientation")
-	turn.Name = "Turn"
-	turn.Mode = Enum.OrientationAlignmentMode.OneAttachment
-	turn.Attachment0 = anchor
-	turn.RigidityEnabled = true
-	turn.CFrame = groundCFrame.Rotation
-	turn.Parent = root
+	-- The owning client places the bike every frame (see the client controller). The spawn
+	-- pose is recorded so the client starts from exactly where the server put the bike.
+	model:SetAttribute("SpawnCFrame", groundCFrame)
 
 	for _, spec in Geometry.parts do
 		local part = Instance.new("Part")

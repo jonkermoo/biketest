@@ -1,6 +1,7 @@
 --!strict
 -- Spawns a bike for each rider and handles respawn requests. The rider's client drives the
 -- bike (it owns the physics), so the server only builds, seats and resets.
+local PhysicsService = game:GetService("PhysicsService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -12,6 +13,27 @@ local Respawn = require(Shared.rules.Respawn)
 local BikeFactory = require(script.BikeFactory)
 
 Players.CharacterAutoLoads = false
+
+-- A seated rider's legs reach the road. If their body collides with the world it drags the
+-- bike: measured in play, the bike crawled at 1.6 studs/s while the riding model said 120.
+-- Riders do not collide with anything; crashes come from the riding model, not body contact.
+local RIDER_GROUP = "Rider"
+PhysicsService:RegisterCollisionGroup(RIDER_GROUP)
+PhysicsService:CollisionGroupSetCollidable(RIDER_GROUP, "Default", false)
+PhysicsService:CollisionGroupSetCollidable(RIDER_GROUP, RIDER_GROUP, false)
+
+local function setRiderGroup(character: Model)
+	for _, d in character:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.CollisionGroup = RIDER_GROUP
+		end
+	end
+	character.DescendantAdded:Connect(function(d)
+		if d:IsA("BasePart") then
+			d.CollisionGroup = RIDER_GROUP
+		end
+	end)
+end
 
 local bikes: { [Player]: Model } = {}
 local lastRespawn: { [Player]: number } = {}
@@ -40,6 +62,7 @@ local function onCharacterAdded(player: Player, character: Model)
 	removeBike(player)
 	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	setRiderGroup(character)
 
 	local bike = BikeFactory.build(spawnGround())
 	bike.Parent = Workspace

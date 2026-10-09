@@ -100,17 +100,14 @@ function LookView.disable()
 	end
 end
 
--- Place the camera at the rider's head. `bikePose` is the bike's full pose (including lean);
--- the view only follows part of the lean, like a rider keeping their head nearer level.
-function LookView.updateCamera(ground: Vector3, yaw: CFrame, pitch: number, lean: number)
-	local bikePose = CFrame.new(ground)
-		* yaw
-		* CFrame.Angles(pitch, 0, 0)
-		* CFrame.Angles(0, 0, -lean)
+-- Place the camera at the rider's head, from the bike exactly as it is drawn this frame
+-- (`bikePose` is the root part's CFrame, including lean). Using the riding model's position
+-- instead put the head a physics step behind the drawn bike at speed. The view only follows
+-- part of the lean, like a rider keeping their head nearer level.
+function LookView.updateCamera(bikePose: CFrame, lean: number)
 	local head = (bikePose * CFrame.new(Look.headOffset)).Position
-	local view = yaw
-		* CFrame.Angles(pitch, 0, 0)
-		* CFrame.Angles(0, 0, -lean * Look.cameraLeanFollow)
+	-- the bike is rolled by -lean; un-roll the view by the part the head does not follow
+	local view = bikePose.Rotation * CFrame.Angles(0, 0, lean * (1 - Look.cameraLeanFollow))
 	Workspace.CurrentCamera.CFrame = CFrame.new(head) * view
 
 	-- The camera sits inside the rider; hide your own body from yourself.

@@ -234,15 +234,38 @@ check("fixation on a hazard lets go slowly", sticky.x > 0 and sticky.x < 1, true
 local mild = LookSteer.fixate(prev, raw, true, 0.3, 1 / 60)
 check("stronger fixation is stickier", mild.x > sticky.x, true)
 
--- Throttle.fromScroll
-near("scroll down opens the throttle", Throttle.fromScroll(0, -1, 0.05), 0.05, 1e-9)
-near("scroll up closes the throttle", Throttle.fromScroll(0.5, 1, 0.05), 0.45, 1e-9)
-check("throttle cannot open past full", Throttle.fromScroll(0.98, -3, 0.05), 1)
-check("throttle cannot close past shut", Throttle.fromScroll(0.02, 3, 0.05), 0)
-near("several notches at once", Throttle.fromScroll(0.2, -4, 0.05), 0.4, 1e-9)
+-- Throttle lever: -1 full brake, 0 closed, +1 full throttle
+near("a notch toward faster opens the throttle", Throttle.fromScroll(0, 1, 0.05), 0.05, 1e-9)
+near("a notch toward slower closes the throttle", Throttle.fromScroll(0.5, -1, 0.05), 0.45, 1e-9)
+near("past closed, slower starts braking", Throttle.fromScroll(0.05, -3, 0.05), -0.10, 1e-9)
+near(
+	"from braking, faster releases the brake first",
+	Throttle.fromScroll(-0.2, 2, 0.05),
+	-0.10,
+	1e-9
+)
+check("lever cannot pass full throttle", Throttle.fromScroll(0.98, 3, 0.05), 1)
+check("lever cannot pass full brake", Throttle.fromScroll(-0.98, -3, 0.05), -1)
 near("no scroll leaves it where it was", Throttle.fromScroll(0.35, 0, 0.05), 0.35, 1e-9)
-check("nan wheel leaves it where it was", Throttle.fromScroll(0.35, 0 / 0, 0.05), 0.35)
-check("nan current is treated as shut", Throttle.fromScroll(0 / 0, -1, 0.05) > 0, true)
+check("nan scroll leaves it where it was", Throttle.fromScroll(0.35, 0 / 0, 0.05), 0.35)
+check("nan lever is treated as closed", Throttle.fromScroll(0 / 0, 1, 0.05) > 0, true)
+
+local t1, b1 = Throttle.split(0.6)
+check("positive lever is throttle only", t1 == 0.6 and b1 == 0, true)
+local t2, b2 = Throttle.split(-0.4)
+check("negative lever is brake only", t2 == 0 and b2 == 0.4, true)
+local t3, b3 = Throttle.split(0)
+check("closed lever is neither", t3 == 0 and b3 == 0, true)
+local t4, b4 = Throttle.split(0 / 0)
+check("nan lever is neither", t4 == 0 and b4 == 0, true)
+local t5, b5 = Throttle.split(5)
+check("split clamps to full", t5 == 1 and b5 == 0, true)
+
+-- braking from the lever really slows the bike, and harder braking slows it faster
+local soft = run(at(60), { throttle = 0, brake = 0.3, steer = 0 }, 1)
+local hard = run(at(60), { throttle = 0, brake = 0.9, steer = 0 }, 1)
+check("lever braking slows the bike", soft.speed < 60, true)
+check("harder lever braking slows it more", hard.speed < soft.speed, true)
 
 -- Crash.impact / impactOverWindow / damage (kept for the part damage model)
 check("small drop is not a crash", Crash.impact(50, 45, 18), 0)
