@@ -21,6 +21,9 @@ return table.freeze({
 	redlineRpm = 15500, -- ESTIMATE: no confirmed 2005 figure found
 	clutchSlipRpm = 9000, -- ESTIMATE: rpm held while slipping the clutch to pull away
 	shiftCutTime = 0.12, -- ESTIMATE: power cut per upshift
+	-- Automatic gearbox (optional, in the settings panel)
+	autoUpshiftRpm = 15000, -- just under the redline
+	autoDownshiftRpm = 8000,
 
 	-- Engine and resistance (fitted)
 	peakPowerPerMass = 264 * PER_M * PER_M, -- W/kg at the wheel, bike plus rider

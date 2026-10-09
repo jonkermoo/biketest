@@ -549,6 +549,89 @@ near(
 )
 check("nan hold time is off", RiderSettings.rearBrakePressure(0 / 0, 0.05, 2.5), 0)
 
+-- Automatic gearbox
+local function autoRide(throttleAt: (number) -> number, seconds: number)
+	local st, t, dt = BikeDynamics.newState(0), 0, 1 / 240
+	local shifts, maxRpm, timeTo100 = 0, 0, nil
+	while t < seconds do
+		local throttle = throttleAt(t)
+		local shift = Gearbox.autoShift(
+			st.speed,
+			st.gear,
+			throttle,
+			R6,
+			R6.autoUpshiftRpm,
+			R6.autoDownshiftRpm
+		)
+		local events
+		st, events = BikeDynamics.step(
+			st,
+			{ throttle = throttle, brake = 0, steer = 0, shift = shift },
+			R6,
+			dt
+		)
+		if events.shifted then
+			shifts += 1
+		end
+		maxRpm = math.max(maxRpm, events.rpm)
+		if not timeTo100 and st.speed >= 100 * KMH then
+			timeTo100 = t
+		end
+		t += dt
+	end
+	return st, shifts, maxRpm, timeTo100
+end
+local flat, _, flatMaxRpm, auto100 = autoRide(function()
+	return 1
+end, 90)
+check("auto: flat out ends in 6th", flat.gear, 6)
+near("auto: flat out reaches the measured top speed", flat.speed / KMH, 265, 3)
+near("auto: 0-100 km/h close to the measured 3.2 s", auto100 or 99, 3.2, 0.15)
+check("auto: never over-revs", flatMaxRpm <= R6.redlineRpm + 1, true)
+local _, cruiseShifts = autoRide(function(t)
+	return if t < 8 then 1 else 0.3
+end, 40)
+local cruising, settledShifts = autoRide(function(t)
+	return if t < 8 then 1 else 0.3
+end, 60)
+check("auto: steady cruising does not keep shifting", settledShifts - cruiseShifts, 0)
+check("auto: cruising stays in a sensible gear", cruising.gear >= 4, true)
+local slowing = at(200 * KMH)
+slowing.gear = 6
+for _ = 1, 240 * 12 do
+	local shift = Gearbox.autoShift(
+		slowing.speed,
+		slowing.gear,
+		0,
+		R6,
+		R6.autoUpshiftRpm,
+		R6.autoDownshiftRpm
+	)
+	slowing = BikeDynamics.step(
+		slowing,
+		{ throttle = 0, brake = 0.6, steer = 0, shift = shift },
+		R6,
+		1 / 240
+	)
+end
+check("auto: braking to a stop changes down to 1st", slowing.gear, 1)
+check(
+	"auto: no downshift that would over-rev",
+	Gearbox.autoShift(150 * KMH, 2, 0, R6, R6.autoUpshiftRpm, R6.autoDownshiftRpm) ~= -1,
+	true
+)
+check("auto setting defaults to off", RiderSettings.defaults().autoShift, false)
+check(
+	"auto setting is kept when valid",
+	RiderSettings.sanitize({ autoShift = true }).autoShift,
+	true
+)
+check(
+	"auto setting rejects non-booleans",
+	RiderSettings.sanitize({ autoShift = "yes" }).autoShift,
+	false
+)
+
 if failures > 0 then
 	error(`{failures} test(s) failed`)
 end

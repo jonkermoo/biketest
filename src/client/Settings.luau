@@ -107,6 +107,11 @@ function Settings.adjust(name: string, steps: number)
 	Settings.set(name, (Settings.current :: any)[name] + steps * range[3])
 end
 
+function Settings.toggleAutoShift()
+	Settings.current.autoShift = not Settings.current.autoShift
+	commit()
+end
+
 function Settings.invertScroll()
 	Settings.current.scrollFasterSign = -Settings.current.scrollFasterSign
 	commit()

@@ -15,6 +15,7 @@ local Bike = require(Shared.config.Bike)
 local Geometry = require(Shared.config.BikeGeometry)
 local Look = require(Shared.config.Look)
 local BikeDynamics = require(Shared.rules.BikeDynamics)
+local Gearbox = require(Shared.rules.Gearbox)
 local LookSteer = require(Shared.rules.LookSteer)
 local RiderSettings = require(Shared.rules.RiderSettings)
 local Throttle = require(Shared.rules.Throttle)
@@ -107,7 +108,17 @@ end
 local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
 	local throttle = Throttle.split(lever)
 	local front, rear = readBrakes()
-	local shift = pendingShift
+	-- Automatic gearbox shifts for the rider; the shift keys are ignored while it is on.
+	local shift = if Settings.current.autoShift
+		then Gearbox.autoShift(
+			state.speed,
+			state.gear,
+			throttle,
+			Bike,
+			Bike.autoUpshiftRpm,
+			Bike.autoDownshiftRpm
+		)
+		else pendingShift
 	pendingShift = 0
 	local steer = key(Enum.KeyCode.D) - key(Enum.KeyCode.A)
 	-- While the settings panel is open the mouse is for clicking, so hold straight unless
@@ -171,6 +182,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		rear = input.rearBrake or 0,
 		speed = state.speed,
 		gear = state.gear,
+		auto = Settings.current.autoShift,
 		rpm = events.rpm,
 		redline = Bike.redlineRpm,
 		rpmScale = 17000,

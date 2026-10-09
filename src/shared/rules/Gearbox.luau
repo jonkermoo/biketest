@@ -72,4 +72,32 @@ function Gearbox.shift(gear: number, direction: number, speed: number, p: Params
 	return target, true
 end
 
+-- Automatic gearbox: which way to shift this frame (+1, -1 or 0).
+-- Up: at `upRpm`, or earlier if the next gear already pulls harder (past the power peak).
+-- Down: when rpm falls below `downRpm`, and only if the lower gear lands well under `upRpm`,
+-- so it can never bounce between two gears or over-rev.
+function Gearbox.autoShift(
+	speed: number,
+	gear: number,
+	throttle: number,
+	p: Params,
+	upRpm: number,
+	downRpm: number
+): number
+	local rpm = Gearbox.rpm(speed, gear, p)
+	local top = #p.gearRatios
+	if gear < top then
+		local nextPullsHarder = throttle > 0
+			and Gearbox.driveAccel(speed, 1, gear + 1, p)
+				> Gearbox.driveAccel(speed, 1, gear, p)
+		if rpm >= upRpm or nextPullsHarder then
+			return 1
+		end
+	end
+	if gear > 1 and rpm < downRpm and Gearbox.rpm(speed, gear - 1, p) <= upRpm * 0.92 then
+		return -1
+	end
+	return 0
+end
+
 return Gearbox

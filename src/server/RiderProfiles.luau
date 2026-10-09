@@ -16,7 +16,22 @@ local RiderProfiles = {}
 local STORE_NAME = "RiderSettings_v1"
 local SAVE_INTERVAL = 6 -- seconds between writes per player
 
-type Entry = { profiles: RiderSettings.Profiles, dirty: boolean, loaded: boolean }
+-- `loadFailed`: the saved data could not be read, so this session must never write; saving
+-- defaults over it would wipe the rider's real settings.
+type Entry = {
+	profiles: RiderSettings.Profiles,
+	dirty: boolean,
+	loaded: boolean,
+	loadFailed: boolean,
+}
+
+local warned: { [string]: boolean } = {}
+local function warnOnce(message: string)
+	if not warned[message] then
+		warned[message] = true
+		warn(message)
+	end
+end
 
 local entries: { [Player]: Entry } = {}
 local store: DataStore? = nil
@@ -45,6 +60,7 @@ local function load(player: Player): Entry
 		return entry
 	end
 	local raw = nil
+	local loadFailed = false
 	if store then
 		local okGet, data = pcall(function()
 			return (store :: DataStore):GetAsync(keyFor(player))
@@ -52,18 +68,26 @@ local function load(player: Player): Entry
 		if okGet then
 			raw = data
 		else
+			loadFailed = true
 			storeError = tostring(data)
-			warn(`[settings] could not load profiles for {player.Name}: {storeError}`)
+			warnOnce(
+				`[settings] could not load saved settings, not saving this session: {storeError}`
+			)
 		end
 	end
-	entry = { profiles = RiderSettings.sanitizeProfiles(raw), dirty = false, loaded = true }
+	entry = {
+		profiles = RiderSettings.sanitizeProfiles(raw),
+		dirty = false,
+		loaded = true,
+		loadFailed = loadFailed,
+	}
 	entries[player] = entry
 	return entry
 end
 
 local function save(player: Player)
 	local entry = entries[player]
-	if not entry or not entry.dirty or not store then
+	if not entry or not entry.dirty or not store or entry.loadFailed then
 		return
 	end
 	entry.dirty = false
@@ -73,7 +97,7 @@ local function save(player: Player)
 	if not okSet then
 		entry.dirty = true -- try again next round
 		storeError = tostring(err)
-		warn(`[settings] could not save profiles for {player.Name}: {storeError}`)
+		warnOnce(`[settings] could not save settings: {storeError}`)
 	else
 		storeError = nil
 	end

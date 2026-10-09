@@ -35,6 +35,7 @@ export type Settings = {
 	thresholdBrake: number, -- front brake % while the threshold-brake button is held
 	rearBrakeStart: number, -- rear brake pressure the moment the button goes down
 	rearBrakeGrowth: number, -- exponential growth rate of rear brake pressure, per second
+	autoShift: boolean, -- automatic gearbox
 	bindings: Bindings,
 }
 export type Profiles = {
@@ -59,6 +60,7 @@ local DEFAULTS = {
 	thresholdBrake = 0.7,
 	rearBrakeStart = 0.05,
 	rearBrakeGrowth = 2.5,
+	autoShift = false,
 }
 
 -- min, max, snap increment
@@ -192,6 +194,9 @@ function RiderSettings.sanitize(raw: any): Settings
 	end
 	if raw.scrollFasterSign == -1 or raw.scrollFasterSign == 1 then
 		s.scrollFasterSign = raw.scrollFasterSign
+	end
+	if type(raw.autoShift) == "boolean" then
+		s.autoShift = raw.autoShift
 	end
 	if type(raw.bindings) == "table" then
 		local used: { [string]: boolean } = {}

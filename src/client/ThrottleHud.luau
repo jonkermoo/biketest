@@ -155,6 +155,7 @@ export type Reading = {
 	rear: number,
 	speed: number, -- studs/s
 	gear: number,
+	auto: boolean, -- automatic gearbox on
 	rpm: number,
 	redline: number,
 	rpmScale: number, -- rpm at the right end of the bar
@@ -169,7 +170,7 @@ function ThrottleHud.update(r: Reading)
 	show(rearGauge :: Gauge, r.rear);
 	(speedLabel :: TextLabel).Text =
 		string.format("%d km/h", math.floor(r.speed * STUDS_PER_S_TO_KMH + 0.5));
-	(gearLabel :: TextLabel).Text = tostring(r.gear)
+	(gearLabel :: TextLabel).Text = if r.auto then `A{r.gear}` else tostring(r.gear)
 	local fraction = math.clamp(r.rpm / r.rpmScale, 0, 1);
 	(rpmFill :: Frame).Size = UDim2.fromScale(fraction, 1);
 	(rpmFill :: Frame).BackgroundColor3 = if r.rpm >= r.redline * 0.97

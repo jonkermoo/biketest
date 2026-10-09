@@ -184,21 +184,26 @@ local function percent(v: number): string
 	return string.format("%d%%", math.floor(v * 100 + 0.5))
 end
 
-local function invertToggle(list: Instance, order: number)
-	local r = container(list, order, "Invert scroll", 36)
-	local label = text(r, "Invert scroll", 15, MUTED)
+-- An ON/OFF row. `isOn` reads the setting; `flip` changes it.
+local function toggle(
+	list: Instance,
+	order: number,
+	title: string,
+	isOn: () -> boolean,
+	flip: () -> ()
+)
+	local r = container(list, order, title, 36)
+	local label = text(r, title, 15, MUTED)
 	label.Size = UDim2.fromScale(0.6, 1)
 	label.TextXAlignment = Enum.TextXAlignment.Left
-	local b = button(r, "", 86, function()
-		Settings.invertScroll()
-	end)
+	local b = button(r, "", 86, flip)
 	b.Name = "Toggle"
 	b.AnchorPoint = Vector2.new(1, 0.5)
 	b.Position = UDim2.fromScale(1, 0.5)
 	table.insert(refreshers, function()
-		local inverted = Settings.current.scrollFasterSign < 0
-		b.Text = if inverted then "ON" else "OFF"
-		b.BackgroundColor3 = if inverted then ACCENT else BUTTON
+		local on = isOn()
+		b.Text = if on then "ON" else "OFF"
+		b.BackgroundColor3 = if on then ACCENT else BUTTON
 	end)
 end
 
@@ -331,7 +336,14 @@ local function build()
 	heading(scroll, 10, "MOUSE WHEEL (THROTTLE / BRAKE LEVER)")
 	slider(scroll, 11, "Throttle per notch", "throttleStep", percent)
 	slider(scroll, 12, "Brake per notch", "brakeStep", percent)
-	invertToggle(scroll, 13)
+	toggle(scroll, 13, "Invert scroll", function()
+		return Settings.current.scrollFasterSign < 0
+	end, Settings.invertScroll)
+
+	heading(scroll, 15, "GEARBOX")
+	toggle(scroll, 16, "Automatic gearbox", function()
+		return Settings.current.autoShift
+	end, Settings.toggleAutoShift)
 
 	heading(scroll, 20, "BRAKES")
 	slider(scroll, 21, "Threshold brake", "thresholdBrake", percent)
