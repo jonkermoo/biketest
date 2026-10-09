@@ -13,10 +13,13 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Remotes = require(Shared:WaitForChild("Remotes"))
 local Bike = require(Shared.config.Bike)
 local Geometry = require(Shared.config.BikeGeometry)
+local Controls = require(Shared.config.Controls)
 local Look = require(Shared.config.Look)
 local BikeDynamics = require(Shared.rules.BikeDynamics)
 local LookSteer = require(Shared.rules.LookSteer)
+local Throttle = require(Shared.rules.Throttle)
 local LookView = require(script.LookView)
+local ThrottleHud = require(script.ThrottleHud)
 
 local player = Players.LocalPlayer
 local requestRespawn = ReplicatedStorage:WaitForChild(Remotes.RequestRespawn) :: RemoteEvent
@@ -46,6 +49,8 @@ local position = Vector3.zero
 local hold: AlignPosition? = nil
 local turn: AlignOrientation? = nil
 local lookTarget = { x = 0, z = 0 }
+-- Twist-grip throttle set by the scroll wheel; stays where the rider leaves it.
+local throttle = 0
 
 local function groundHeight(at: Vector3, fallback: number): number
 	local hit = Workspace:Raycast(at + Vector3.new(0, 6, 0), Vector3.new(0, -40, 0), groundParams)
@@ -60,15 +65,16 @@ local function attach(model: Model)
 	position = if hold then hold.Position else model:GetPivot().Position
 	local _, yaw, _ = (if turn then turn.CFrame else model:GetPivot()):ToEulerAnglesYXZ()
 	state = BikeDynamics.newState(yaw)
+	throttle = 0
 	local ignore = { model, player.Character :: Model } :: { Instance }
 	groundParams.FilterDescendantsInstances = ignore
 	LookView.enable(ignore)
+	ThrottleHud.setVisible(true)
 end
 
 -- Steering demand: A/D override with assisted keyboard steering; otherwise steer to the
 -- world marker, uncapped by the assist.
 local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
-	local throttle = key(Enum.KeyCode.W)
 	local brake = key(Enum.KeyCode.S)
 	local steer = key(Enum.KeyCode.D) - key(Enum.KeyCode.A)
 	if steer ~= 0 then
@@ -101,6 +107,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		else
 			bike = nil
 			LookView.disable()
+			ThrottleHud.setVisible(false)
 		end
 	end
 	if not bike then
@@ -117,6 +124,10 @@ RunService.Heartbeat:Connect(function(dt: number)
 		LookView.updateLook() -- keep the dot and marker moving while steering by keys
 	end
 	state, events = BikeDynamics.step(state, input, Bike, dt)
+	if state.fallen then
+		throttle = 0 -- the engine cuts when the bike goes down
+	end
+	ThrottleHud.update(throttle, state.speed)
 	if events.lostGrip then
 		print(
 			string.format(
@@ -157,10 +168,21 @@ RunService.Heartbeat:Connect(function(dt: number)
 	bike:SetAttribute("GripUsed", events.gripUsed)
 	bike:SetAttribute("Fallen", state.fallen)
 	bike:SetAttribute("LookCurvature", input.curvature or 0)
+	bike:SetAttribute("Throttle", throttle)
 end)
 
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
 	if not processed and input.KeyCode == Enum.KeyCode.R then
 		requestRespawn:FireServer()
+	end
+end)
+
+-- Scroll down twists the grip open, scroll up rolls it closed.
+UserInputService.InputChanged:Connect(function(input: InputObject, processed: boolean)
+	if processed or input.UserInputType ~= Enum.UserInputType.MouseWheel then
+		return
+	end
+	if bike and not state.fallen then
+		throttle = Throttle.fromScroll(throttle, input.Position.Z, Controls.throttleStep)
 	end
 end)

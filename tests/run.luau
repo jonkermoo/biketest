@@ -2,6 +2,7 @@
 local BikeDynamics = require("../src/shared/rules/BikeDynamics")
 local Crash = require("../src/shared/rules/Crash")
 local LookSteer = require("../src/shared/rules/LookSteer")
+local Throttle = require("../src/shared/rules/Throttle")
 local Respawn = require("../src/shared/rules/Respawn")
 
 local failures = 0
@@ -27,6 +28,7 @@ local params: BikeDynamics.Params = {
 	acceleration = 20,
 	brakeDecel = 35,
 	drag = 10,
+	aeroDrag = 0, -- kept at 0 so speed tests are simple; air drag has its own tests below
 	maxCurvature = 0.1,
 	curvatureSpeedRef = 20,
 	leanRate = 5,
@@ -61,7 +63,7 @@ check("sanitize clamps low", BikeDynamics.sanitize(-5, 0, 1), 0)
 
 -- speed
 local s = run(BikeDynamics.newState(0), { throttle = 1, brake = 0, steer = 0 }, 1)
-near("throttle accelerates about 20 in 1 s", s.speed, 20, 0.5)
+near("full throttle gains acceleration minus rolling drag", s.speed, 10, 0.5)
 s = run(at(50), { throttle = 0, brake = 0, steer = 0 }, 1)
 near("no throttle applies drag", s.speed, 40, 0.5)
 s = run(at(50), { throttle = 0, brake = 1, steer = 0 }, 1)
@@ -72,6 +74,28 @@ s = run(at(95), { throttle = 1, brake = 0, steer = 0 }, 2)
 check("speed capped at max", s.speed, 100)
 s = run(at(50), { throttle = 0 / 0, brake = 0 / 0, steer = 0 / 0 }, 1)
 near("nan input behaves like no input", s.speed, 40, 0.5)
+
+-- air drag: each throttle opening settles at its own cruising speed
+local aero = table.clone(params)
+aero.acceleration = 28
+aero.drag = 4
+aero.aeroDrag = 24 / 14400
+aero.maxSpeed = 1000 -- so the cap does not hide the drag balance
+local function cruise(t: number): number
+	local st = BikeDynamics.newState(0)
+	for _ = 1, 60 * 60 do
+		st = BikeDynamics.step(st, { throttle = t, brake = 0, steer = 0 }, aero, 1 / 60)
+	end
+	return st.speed
+end
+near("full throttle settles at the designed top speed", cruise(1), 120, 0.5)
+near("half throttle cruises near 77", cruise(0.5), math.sqrt(10 / aero.aeroDrag), 0.5)
+near("quarter throttle cruises near 42", cruise(0.25), math.sqrt(3 / aero.aeroDrag), 0.5)
+check("more throttle cruises faster", cruise(0.5) > cruise(0.25), true)
+check("too little throttle to beat rolling drag stops the bike", cruise(0.1), 0)
+local fast = at(100)
+local slowed = run(fast, { throttle = 0.25, brake = 0, steer = 0 }, 0.5)
+check("rolling off the throttle at speed slows the bike", slowed.speed < 100, true)
 
 -- straight line
 s = run(at(40), { throttle = 0.5, brake = 0, steer = 0 }, 2)
@@ -87,7 +111,8 @@ check("left steer leans left", s.lean < 0, true)
 check("left steer turns left (heading increases)", s.heading > 0, true)
 
 -- steady lean matches cornering physics: tan(lean) = v^2 * k / g
-local steady = run(at(30), { throttle = 0.3, brake = 0, steer = 0.5 }, 3)
+-- throttle 0.5 exactly balances rolling drag in these params, so the speed really is steady
+local steady = run(at(30), { throttle = 0.5, brake = 0, steer = 0.5 }, 3)
 local k = 0.5 * BikeDynamics.maxCurvatureAt(steady.speed, params)
 local expected = math.atan(steady.speed * steady.speed * k / params.gravity)
 near("steady lean matches v^2k/g", steady.lean, expected, 0.01)
@@ -208,6 +233,16 @@ local sticky = LookSteer.fixate(prev, raw, true, 1, 1 / 60)
 check("fixation on a hazard lets go slowly", sticky.x > 0 and sticky.x < 1, true)
 local mild = LookSteer.fixate(prev, raw, true, 0.3, 1 / 60)
 check("stronger fixation is stickier", mild.x > sticky.x, true)
+
+-- Throttle.fromScroll
+near("scroll down opens the throttle", Throttle.fromScroll(0, -1, 0.05), 0.05, 1e-9)
+near("scroll up closes the throttle", Throttle.fromScroll(0.5, 1, 0.05), 0.45, 1e-9)
+check("throttle cannot open past full", Throttle.fromScroll(0.98, -3, 0.05), 1)
+check("throttle cannot close past shut", Throttle.fromScroll(0.02, 3, 0.05), 0)
+near("several notches at once", Throttle.fromScroll(0.2, -4, 0.05), 0.4, 1e-9)
+near("no scroll leaves it where it was", Throttle.fromScroll(0.35, 0, 0.05), 0.35, 1e-9)
+check("nan wheel leaves it where it was", Throttle.fromScroll(0.35, 0 / 0, 0.05), 0.35)
+check("nan current is treated as shut", Throttle.fromScroll(0 / 0, -1, 0.05) > 0, true)
 
 -- Crash.impact / impactOverWindow / damage (kept for the part damage model)
 check("small drop is not a crash", Crash.impact(50, 45, 18), 0)

@@ -8,6 +8,7 @@ export type Params = {
 	acceleration: number,
 	brakeDecel: number,
 	drag: number,
+	aeroDrag: number,
 	maxCurvature: number,
 	curvatureSpeedRef: number,
 	leanRate: number,
@@ -110,8 +111,12 @@ function BikeDynamics.step(state: State, input: Input, params: Params, dt: numbe
 	local steer = BikeDynamics.sanitize(input.steer, -1, 1)
 
 	-- Speed
-	local change = if throttle > 0 then params.acceleration * throttle else -params.drag
-	change -= params.brakeDecel * brake
+	-- Engine pushes in proportion to throttle; rolling drag and air drag (speed squared)
+	-- always push back, so each throttle opening settles at its own cruising speed.
+	local change = params.acceleration * throttle
+		- params.drag
+		- params.aeroDrag * state.speed * state.speed
+		- params.brakeDecel * brake
 	local speed = math.clamp(state.speed + change * dt, 0, params.maxSpeed)
 
 	-- The rider asks for a turn; the bike leans to hold that lateral acceleration.

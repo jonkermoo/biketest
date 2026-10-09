@@ -6,7 +6,11 @@ return table.freeze({
 	maxSpeed = 120, -- studs/s
 	acceleration = 28, -- studs/s^2 at full throttle (about 0 to 100 km/h in 3.5 s)
 	brakeDecel = 36, -- studs/s^2 at full brake (just over 1 g on sport tyres)
-	drag = 4, -- passive slowdown with no throttle
+	drag = 4, -- rolling resistance, always present
+	-- Air drag per (studs/s)^2. Chosen so full throttle balances drag at maxSpeed:
+	-- (acceleration - drag) / maxSpeed^2 = 24 / 14400. Part throttle settles lower, e.g.
+	-- 25% cruises near 42 studs/s and 50% near 77.
+	aeroDrag = 24 / 14400,
 
 	-- Steering and lean
 	maxCurvature = 0.12, -- 1/studs at a standstill (tightest turn, radius ~8 studs)
