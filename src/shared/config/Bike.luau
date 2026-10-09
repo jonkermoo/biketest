@@ -1,23 +1,28 @@
 --!strict
 -- Every tweakable number for the bike lives here. Balance by editing data, not code.
--- Speeds are studs/s, accelerations studs/s^2, angles radians.
+-- Units: studs, seconds, radians. One stud is taken as 0.28 m, so 100 studs/s is about 100 km/h.
 return table.freeze({
-	-- Motion
-	maxSpeed = 90,
-	acceleration = 28,
-	brakeDecel = 60,
-	drag = 8, -- passive slowdown when no throttle
-	maxTurnRate = 1.6, -- rad/s at low speed
-	turnFalloff = 0.65, -- 0..1, how much turning is reduced at max speed
-	syncSlack = 4, -- if physics slows us by more than this, accept the slower speed
+	-- Longitudinal
+	maxSpeed = 120, -- studs/s
+	acceleration = 28, -- studs/s^2 at full throttle (about 0 to 100 km/h in 3.5 s)
+	brakeDecel = 36, -- studs/s^2 at full brake (just over 1 g on sport tyres)
+	drag = 4, -- passive slowdown with no throttle
 
-	-- Crash
-	maxHealth = 100,
-	crashMinDrop = 18, -- sudden speed loss below this is not a crash
-	crashHitCooldown = 0.5,
-	crashSettle = 0.2, -- seconds to watch a collision play out before applying damage
-	crashWindow = 0.3, -- seconds of speed history used to measure an impact
+	-- Steering and lean
+	maxCurvature = 0.12, -- 1/studs at a standstill (tightest turn, radius ~8 studs)
+	curvatureSpeedRef = 25, -- speed at which the tightest available turn has halved
+	leanRate = 5, -- how quickly lean follows the demanded lean (1/s)
+	gravity = 35, -- studs/s^2 (9.81 m/s^2 at 0.28 m per stud)
+
+	-- Grip. `tyreGrip` is the friction coefficient: lateral plus braking force
+	-- must stay below it or the tyres let go. Worn tyres will lower this later.
+	tyreGrip = 1.1,
+	steerAssist = 0.85, -- full-lock key press uses at most this share of the grip budget
+
+	-- Falling over
+	slideDecel = 22, -- studs/s^2 slowdown while sliding on the road
+	lyingLean = 1.45, -- how far over the bike lies when fallen (rad)
 
 	-- Respawn
-	respawnCooldown = 3,
+	respawnCooldown = 2,
 })

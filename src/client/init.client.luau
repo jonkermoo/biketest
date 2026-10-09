@@ -1,106 +1,136 @@
 --!strict
+-- Drives the rider's bike: reads input, steps the pure riding model, follows the ground with
+-- raycasts under each wheel, and places the bike. The client owns the bike's physics, so the
+-- position it sets replicates to the server and to other players.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Remotes = require(Shared:WaitForChild("Remotes"))
 local Bike = require(Shared.config.Bike)
-local BikeMotion = require(Shared.rules.BikeMotion)
+local Geometry = require(Shared.config.BikeGeometry)
+local BikeDynamics = require(Shared.rules.BikeDynamics)
 
 local player = Players.LocalPlayer
 local requestRespawn = ReplicatedStorage:WaitForChild(Remotes.RequestRespawn) :: RemoteEvent
 
--- Input layer: turns keys into plain numbers. Gamepad or touch would add sources here
--- and leave the bike code below untouched.
-local function readInput(): (number, number, number)
-	local throttle = if UserInputService:IsKeyDown(Enum.KeyCode.W) then 1 else 0
-	local brake = if UserInputService:IsKeyDown(Enum.KeyCode.S) then 1 else 0
-	local steer = (if UserInputService:IsKeyDown(Enum.KeyCode.D) then 1 else 0)
-		- (if UserInputService:IsKeyDown(Enum.KeyCode.A) then 1 else 0)
-	return throttle, brake, steer
+-- Input layer: keys become plain numbers. The mouse look target will be another source here.
+local function readInput(): BikeDynamics.Input
+	local function key(code: Enum.KeyCode): number
+		return if UserInputService:IsKeyDown(code) then 1 else 0
+	end
+	return {
+		throttle = key(Enum.KeyCode.W),
+		brake = key(Enum.KeyCode.S),
+		steer = key(Enum.KeyCode.D) - key(Enum.KeyCode.A),
+	}
 end
 
-local function findBody(): BasePart?
+local function findBike(): Model?
 	local character = player.Character
-	if not character then
-		return nil
-	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local seat = humanoid and humanoid.SeatPart
-	if seat and seat.Name == "BikeSeat" and seat.Parent then
-		local body = seat.Parent:FindFirstChild("Body")
-		if body and body:IsA("BasePart") then
-			return body
-		end
+	if seat and seat.Name == "BikeSeat" and seat.Parent and seat.Parent:IsA("Model") then
+		return seat.Parent
 	end
 	return nil
 end
 
-local activeBody: BasePart? = nil
-local align: AlignOrientation? = nil
-local heading = 0
-local speed = 0
+local bike: Model? = nil
+local state: BikeDynamics.State = BikeDynamics.newState(0)
+local wheelSpin = 0
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-local function detach()
-	if align then
-		align:Destroy()
-		align = nil
-	end
-	activeBody = nil
+local function groundHeight(at: Vector3, fallback: number): number
+	local hit = Workspace:Raycast(at + Vector3.new(0, 6, 0), Vector3.new(0, -40, 0), rayParams)
+	return if hit then hit.Position.Y else fallback
 end
 
-local function attach(body: BasePart)
-	detach()
-	activeBody = body
-	local _, yaw, _ = body.CFrame:ToEulerAnglesYXZ()
-	heading = yaw
-	speed = 0
+-- The bike's position is owned here, not read back from physics each frame, so stray
+-- physics forces cannot accumulate into drift.
+local position = Vector3.zero
+local hold: AlignPosition? = nil
+local turn: AlignOrientation? = nil
 
-	local attachment = Instance.new("Attachment")
-	attachment.Parent = body
-	local alignment = Instance.new("AlignOrientation")
-	alignment.Mode = Enum.OrientationAlignmentMode.OneAttachment
-	alignment.Attachment0 = attachment
-	alignment.RigidityEnabled = true
-	alignment.CFrame = CFrame.Angles(0, heading, 0)
-	alignment.Parent = body
-	align = alignment
+local function attach(model: Model)
+	bike = model
+	local root = model.PrimaryPart :: BasePart
+	hold = root:FindFirstChild("Hold") :: AlignPosition?
+	turn = root:FindFirstChild("Turn") :: AlignOrientation?
+	-- Start from the server's spawn target, which physics cannot have disturbed.
+	position = if hold then hold.Position else model:GetPivot().Position
+	local _, yaw, _ = (if turn then turn.CFrame else model:GetPivot()):ToEulerAnglesYXZ()
+	state = BikeDynamics.newState(yaw)
+	rayParams.FilterDescendantsInstances = { model, player.Character :: Model }
 end
 
 RunService.Heartbeat:Connect(function(dt: number)
-	local body = findBody()
-	if not body then
-		if activeBody then
-			detach()
+	local model = findBike()
+	if model ~= bike then
+		if model then
+			attach(model)
+		else
+			bike = nil
 		end
+	end
+	if not bike then
 		return
 	end
-	if body ~= activeBody then
-		attach(body)
+	local root = bike.PrimaryPart
+	if not root then
+		return
 	end
 
-	local throttle, brake, steer = readInput()
-	local velocity = body.AssemblyLinearVelocity
-	local forward = CFrame.Angles(0, heading, 0).LookVector
-
-	speed = BikeMotion.syncSpeed(speed, velocity:Dot(forward), Bike.syncSlack)
-	speed = BikeMotion.step(speed, throttle, brake, dt, Bike)
-	heading -= BikeMotion.turnRate(speed, steer, Bike) * dt
-
-	local cframe = CFrame.Angles(0, heading, 0)
-	if align then
-		align.CFrame = cframe
+	local events
+	state, events = BikeDynamics.step(state, readInput(), Bike, dt)
+	if events.lostGrip then
+		print(
+			string.format(
+				"[bike] lost grip at %.0f studs/s, lean %.0f deg",
+				state.speed,
+				math.deg(state.lean)
+			)
+		)
 	end
-	body.AssemblyLinearVelocity = cframe.LookVector * speed + Vector3.new(0, velocity.Y, 0)
+
+	-- Move along the heading, then sit the wheels on the ground.
+	local yaw = CFrame.Angles(0, state.heading, 0)
+	local forward = yaw.LookVector
+	local pos = position + forward * state.speed * dt
+	local frontAt = pos + forward * Geometry.halfWheelbase
+	local rearAt = pos - forward * Geometry.halfWheelbase
+	local frontY = groundHeight(frontAt, pos.Y)
+	local rearY = groundHeight(rearAt, pos.Y)
+	local pitch = math.atan2(frontY - rearY, Geometry.halfWheelbase * 2)
+	position = Vector3.new(pos.X, (frontY + rearY) / 2, pos.Z)
+
+	if hold and turn then
+		hold.Position = position
+		turn.CFrame = yaw * CFrame.Angles(pitch, 0, 0) * CFrame.Angles(0, 0, -state.lean)
+	end
+
+	-- Wheels roll with speed (visual only).
+	wheelSpin -= state.speed / Geometry.wheelRadius * dt
+	for _, id in { "front_wheel", "rear_wheel" } do
+		local motor = root:FindFirstChild(id .. "_motor") :: Motor6D?
+		if motor then
+			motor.Transform = CFrame.Angles(wheelSpin, 0, 0)
+		end
+	end
+
+	-- Debug readout for tests and a future HUD.
+	bike:SetAttribute("Speed", state.speed)
+	bike:SetAttribute("LeanDeg", math.deg(state.lean))
+	bike:SetAttribute("GripUsed", events.gripUsed)
+	bike:SetAttribute("Fallen", state.fallen)
 end)
 
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
-	if processed then
-		return
-	end
-	if input.KeyCode == Enum.KeyCode.R then
+	if not processed and input.KeyCode == Enum.KeyCode.R then
 		requestRespawn:FireServer()
 	end
 end)
