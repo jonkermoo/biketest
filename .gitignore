@@ -1,0 +1,22 @@
+# Only game code and tests are tracked. Everything below stays on this PC.
+
+# Design docs, skills and asset pipeline (not code)
+docs/
+.claude/
+blender/
+tools/
+
+# Rojo / Roblox build output
+build/
+*.rbxl
+*.rbxlx
+*.rbxm
+sourcemap.json
+
+# Keys live in environment variables, never in files
+.env
+*.key
+
+# OS
+Thumbs.db
+.DS_Store

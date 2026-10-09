@@ -1,0 +1,5 @@
+# StyLua is configured with line_endings = "Unix", so keep LF in the working tree on every OS.
+* text=auto eol=lf
+*.fbx binary
+*.blend binary
+*.png binary
