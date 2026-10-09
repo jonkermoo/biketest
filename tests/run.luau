@@ -549,6 +549,78 @@ near(
 )
 check("nan hold time is off", RiderSettings.rearBrakePressure(0 / 0, 0.05, 2.5), 0)
 
+-- The right hand: throttle and front brake move gradually and never overlap
+local hand =
+	{ throttleOpenRate = 3, throttleCloseRate = 5, brakeApplyRate = 2.5, brakeReleaseRate = 5 }
+local function handTrace(from: number, to: number, seconds: number)
+	local pos, dt, both, trace = from, 1 / 240, false, {}
+	for i = 1, math.floor(seconds / dt) do
+		pos = Throttle.approach(pos, to, dt, hand)
+		local t, b = Throttle.split(pos)
+		if t > 0 and b > 0 then
+			both = true
+		end
+		trace[i] = pos
+	end
+	return pos, both, trace
+end
+local endPos, overlapped, trace = handTrace(0.6, -0.7, 2)
+near("threshold brake from 60% throttle ends at 70% brake", endPos, -0.7, 1e-9)
+check("throttle and front brake are never on together", overlapped, false)
+near(
+	"throttle closes at the close rate first (0.6 at 5/s = 0.12 s)",
+	trace[math.floor(0.06 * 240)],
+	0.6 - 0.3,
+	0.02
+)
+local firstBrake
+for i, v in trace do
+	if v < 0 then
+		firstBrake = i / 240
+		break
+	end
+end
+near("the brake only starts once the throttle is closed", firstBrake or -1, 0.12, 0.01)
+near(
+	"then the brake rises at the apply rate (0.7 at 2.5/s = 0.28 s more)",
+	(function()
+		for i, v in trace do
+			if v <= -0.7 + 1e-9 then
+				return i / 240
+			end
+		end
+		return -1
+	end)(),
+	0.12 + 0.28,
+	0.01
+)
+check(
+	"the hand never overshoots its target",
+	(function()
+		for _, v in trace do
+			if v < -0.7 - 1e-9 then
+				return false
+			end
+		end
+		return true
+	end)(),
+	true
+)
+local released = handTrace(-0.7, 0, 0.1)
+near("releasing the brake goes at the release rate", released, -0.7 + 0.5, 0.01)
+near(
+	"from closed, the throttle opens at the open rate",
+	Throttle.approach(0, 1, 0.1, hand),
+	0.3,
+	1e-9
+)
+near("one small step does not jump", Throttle.approach(0.5, -1, 1 / 240, hand), 0.5 - 5 / 240, 1e-9)
+check("already at the target stays put", Throttle.approach(-0.4, -0.4, 1, hand), -0.4)
+check("nan current is treated as closed", Throttle.approach(0 / 0, 0, 1, hand), 0)
+check("nan target holds position", Throttle.approach(0.3, 0 / 0, 1, hand), 0.3)
+local bike = require("../src/shared/config/Bike")
+near("R6 config: full brake from closed takes ~0.35 s", 1 / bike.brakeApplyRate, 0.35, 0.02)
+
 -- Automatic gearbox
 local function autoRide(throttleAt: (number) -> number, seconds: number)
 	local st, t, dt = BikeDynamics.newState(0), 0, 1 / 240

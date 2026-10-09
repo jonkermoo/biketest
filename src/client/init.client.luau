@@ -52,8 +52,12 @@ groundParams.FilterType = Enum.RaycastFilterType.Exclude
 -- The bike's position is owned here, not read back from physics each frame.
 local position = Vector3.zero
 local lookTarget = { x = 0, z = 0 }
--- Mouse-wheel lever: -1 full brake, 0 closed, +1 full throttle. Stays where it is left.
-local lever = 0
+-- Where the rider has set the mouse-wheel lever: -1 full front brake, 0 closed, +1 full
+-- throttle. It stays where it is left. It is a target: the hand moves there gradually.
+local wheelLever = 0
+-- Where the rider's right hand actually is, on the same scale. Throttle and front brake both
+-- come from it, so they can never be on together.
+local hand = 0
 -- Gear change asked for since the last frame: +1 up, -1 down.
 local pendingShift = 0
 -- When the rear brake input went down (nil while released).
@@ -72,7 +76,8 @@ local function attach(model: Model)
 	position = start.Position
 	local _, yaw, _ = start:ToEulerAnglesYXZ()
 	state = BikeDynamics.newState(yaw)
-	lever = 0
+	wheelLever = 0
+	hand = 0
 	pendingShift = 0
 	rearHeldSince = nil
 	local ignore = { model, player.Character :: Model } :: { Instance }
@@ -81,33 +86,44 @@ local function attach(model: Model)
 	ThrottleHud.setVisible(true)
 end
 
--- Brakes: the wheel lever, the threshold brake (held = a set %), and the full-brake key all
--- work the front brake; the strongest wins. The rear brake builds up exponentially while held
--- and lets go the moment it is released.
-local function readBrakes(): (number, number)
+-- The right hand: throttle and front brake are one hand. The wheel lever, the threshold
+-- brake (held = a set %) and the full-brake key all set where the hand should go; the hand
+-- then moves there at realistic speeds, rolling the throttle closed before the brake rises.
+-- The rear brake is the right foot: separate, so it can drag while on the throttle. It builds
+-- up exponentially while held and lets go the moment it is released.
+-- Returns throttle, front brake, rear brake.
+local function readHand(dt: number): (number, number, number)
 	local s = Settings.current
-	local _, leverBrake = Throttle.split(lever)
+	local target = wheelLever
+	local rear = 0
 	if SettingsPanel.isOpen() then
-		rearHeldSince = nil
-		return leverBrake, 0 -- the mouse buttons are clicking the panel
-	end
-	local threshold = if Settings.isHeld("thresholdBrake") then s.thresholdBrake else 0
-	local full = if Settings.isHeld("fullBrake") then 1 else 0
-	local front = math.max(leverBrake, threshold, full)
+		rearHeldSince = nil -- the mouse buttons are clicking the panel
+	else
+		local thresholdHeld = Settings.isHeld("thresholdBrake")
+		local fullHeld = Settings.isHeld("fullBrake")
+		if thresholdHeld or fullHeld then
+			-- Grabbing the front brake shuts the throttle for good: after letting go, the
+			-- throttle stays closed until the rider scrolls it open again.
+			wheelLever = math.min(wheelLever, 0)
+			local squeeze = if fullHeld then 1 else s.thresholdBrake
+			target = math.min(wheelLever, -squeeze)
+		end
 
-	if rearHeldSince and not Settings.isHeld("rearBrake") then
-		rearHeldSince = nil -- released (even if the release event was missed)
+		if rearHeldSince and not Settings.isHeld("rearBrake") then
+			rearHeldSince = nil -- released (even if the release event was missed)
+		end
+		local held = if rearHeldSince then os.clock() - rearHeldSince else nil
+		rear = RiderSettings.rearBrakePressure(held, s.rearBrakeStart, s.rearBrakeGrowth)
 	end
-	local held = if rearHeldSince then os.clock() - rearHeldSince else nil
-	local rear = RiderSettings.rearBrakePressure(held, s.rearBrakeStart, s.rearBrakeGrowth)
-	return front, rear
+	hand = Throttle.approach(hand, target, dt, Bike)
+	local throttle, front = Throttle.split(hand)
+	return throttle, front, rear
 end
 
 -- Steering demand: A/D override with assisted keyboard steering; otherwise steer to the
 -- world marker, uncapped by the assist.
 local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
-	local throttle = Throttle.split(lever)
-	local front, rear = readBrakes()
+	local throttle, front, rear = readHand(dt)
 	-- Automatic gearbox shifts for the rider; the shift keys are ignored while it is on.
 	local shift = if Settings.current.autoShift
 		then Gearbox.autoShift(
@@ -173,7 +189,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	end
 	state, events = BikeDynamics.step(state, input, Bike, dt)
 	if state.fallen then
-		lever = 0 -- the engine cuts and the rider lets go when the bike goes down
+		-- the engine cuts and the rider lets go when the bike goes down
+		wheelLever = 0
+		hand = 0
 		rearHeldSince = nil
 	end
 	ThrottleHud.update({
@@ -283,17 +301,17 @@ UserInputService.InputEnded:Connect(function(input: InputObject)
 	end
 end)
 
--- The wheel moves one lever: toward "faster" releases the brake then opens the throttle;
--- toward "slower" closes the throttle then brakes. Direction and step sizes come from the
--- rider's settings.
+-- The wheel sets the lever target: toward "faster" releases the brake then opens the
+-- throttle; toward "slower" closes the throttle then brakes. The hand follows gradually.
+-- Direction and step sizes come from the rider's settings.
 UserInputService.InputChanged:Connect(function(input: InputObject, processed: boolean)
 	if processed or input.UserInputType ~= Enum.UserInputType.MouseWheel then
 		return
 	end
 	if bike and not state.fallen then
 		local s = Settings.current
-		lever = Throttle.fromScroll(
-			lever,
+		wheelLever = Throttle.fromScroll(
+			wheelLever,
 			input.Position.Z * s.scrollFasterSign,
 			s.throttleStep,
 			s.brakeStep

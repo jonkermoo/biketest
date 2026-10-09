@@ -46,6 +46,13 @@ return table.freeze({
 	-- citing Fatzinger et al. 2019).
 	maxBrakeDecel = 0.98 * G * PER_M,
 
+	-- ESTIMATES: how fast the rider's right hand moves (full lever travel per second). The
+	-- throttle and front brake share this hand, so braking always rolls the throttle off first.
+	throttleOpenRate = 3, -- 0 to full throttle in ~0.33 s
+	throttleCloseRate = 5, -- full throttle to closed in ~0.2 s
+	brakeApplyRate = 2.8, -- closed to full front brake in ~0.35 s
+	brakeReleaseRate = 5, -- full brake to released in ~0.2 s
+
 	-- Steering and lean
 	maxCurvature = 0.12, -- 1/studs at a standstill (tightest turn, radius ~8 studs)
 	curvatureSpeedRef = 25, -- speed at which the tightest available turn has halved

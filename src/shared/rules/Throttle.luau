@@ -40,6 +40,52 @@ function Throttle.fromScroll(
 	return lever
 end
 
+export type HandRates = {
+	throttleOpenRate: number, -- lever units per second
+	throttleCloseRate: number,
+	brakeApplyRate: number,
+	brakeReleaseRate: number,
+}
+
+-- Move the rider's right hand from `current` toward `target` over `dt` seconds, at realistic
+-- speeds. The hand is one lever (throttle above 0, front brake below), so going from throttle
+-- to brake always rolls the throttle closed first and only then squeezes the brake, each at its
+-- own rate. Throttle and front brake can never both be on.
+function Throttle.approach(current: number, target: number, dt: number, rates: HandRates): number
+	if current ~= current then
+		current = 0
+	end
+	if target ~= target then
+		target = current
+	end
+	current = math.clamp(current, -1, 1)
+	target = math.clamp(target, -1, 1)
+	local pos = current
+	local remaining = math.max(dt, 0)
+	while remaining > 1e-12 and pos ~= target do
+		local down = target < pos
+		local rate
+		if down then
+			rate = if pos > 0 then rates.throttleCloseRate else rates.brakeApplyRate
+		else
+			rate = if pos < 0 then rates.brakeReleaseRate else rates.throttleOpenRate
+		end
+		-- stop at closed (0) when crossing it, because the rate changes there
+		local crossing = (pos > 0 and target < 0) or (pos < 0 and target > 0)
+		local goal = if crossing then 0 else target
+		local distance = math.abs(goal - pos)
+		local reach = rate * remaining
+		if reach >= distance then
+			pos = goal
+			remaining -= distance / rate
+		else
+			pos += if down then -reach else reach
+			remaining = 0
+		end
+	end
+	return pos
+end
+
 -- Split the lever into throttle (0..1) and brake (0..1). Only one is ever non-zero.
 function Throttle.split(lever: number): (number, number)
 	if lever ~= lever then
