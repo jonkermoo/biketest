@@ -18,6 +18,9 @@ return table.freeze({
 	-- must stay below it or the tyres let go. Worn tyres will lower this later.
 	tyreGrip = 1.1,
 	steerAssist = 0.85, -- full-lock key press uses at most this share of the grip budget
+	-- A look target may ask for up to this many times the tyre grip. Above 1 means looking too
+	-- sharply can really drop the bike; this is a realism dial.
+	lookGripLimit = 1.4,
 
 	-- Falling over
 	slideDecel = 22, -- studs/s^2 slowdown while sliding on the road

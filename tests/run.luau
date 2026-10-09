@@ -1,6 +1,7 @@
 --!strict
 local BikeDynamics = require("../src/shared/rules/BikeDynamics")
 local Crash = require("../src/shared/rules/Crash")
+local LookSteer = require("../src/shared/rules/LookSteer")
 local Respawn = require("../src/shared/rules/Respawn")
 
 local failures = 0
@@ -32,6 +33,7 @@ local params: BikeDynamics.Params = {
 	gravity = 35,
 	tyreGrip = 1.0,
 	steerAssist = 0.8,
+	lookGripLimit = 1.5,
 	slideDecel = 20,
 	lyingLean = 1.4,
 }
@@ -127,6 +129,85 @@ check(
 	true
 )
 near("standstill curvature is the geometric max", BikeDynamics.maxCurvatureAt(0, params), 0.1, 1e-9)
+
+-- LookSteer.curvatureTo
+check("look straight ahead: no turn", LookSteer.curvatureTo(0, 50), 0)
+check("look right: turn right", LookSteer.curvatureTo(5, 50) > 0, true)
+check("look left: turn left", LookSteer.curvatureTo(-5, 50) < 0, true)
+near(
+	"left and right are symmetric",
+	LookSteer.curvatureTo(5, 50),
+	-LookSteer.curvatureTo(-5, 50),
+	1e-12
+)
+near("pure pursuit arc k = 2x/d^2", LookSteer.curvatureTo(3, 4), 2 * 3 / 25, 1e-12)
+check(
+	"looking further ahead asks for a gentler turn",
+	LookSteer.curvatureTo(5, 100) < LookSteer.curvatureTo(5, 30),
+	true
+)
+check("target behind on the right: tightest right", LookSteer.curvatureTo(5, -10), math.huge)
+check("target behind on the left: tightest left", LookSteer.curvatureTo(-5, -10), -math.huge)
+check("target straight behind: no turn", LookSteer.curvatureTo(0, -10), 0)
+check("nan look is no turn", LookSteer.curvatureTo(0 / 0, 10), 0)
+
+-- looking: a gentle look is safe, a sharp look at speed drops the bike
+local gentle = run(
+	at(40),
+	{ throttle = 0.3, brake = 0, steer = 0, curvature = LookSteer.curvatureTo(2, 120) },
+	3
+)
+check("gentle look at speed does not fall", gentle.fallen, false)
+local sharp = run(
+	at(60),
+	{ throttle = 0.3, brake = 0, steer = 0, curvature = LookSteer.curvatureTo(15, 30) },
+	3
+)
+check("sharp look at speed falls", sharp.fallen, true)
+local slowSharp =
+	run(at(8), { throttle = 0, brake = 0, steer = 0, curvature = LookSteer.curvatureTo(15, 30) }, 2)
+check("same sharp look at walking pace is fine", slowSharp.fallen, false)
+local turned = run(
+	at(30),
+	{ throttle = 0.3, brake = 0, steer = 0, curvature = LookSteer.curvatureTo(4, 80) },
+	1
+)
+check("look right makes the bike turn right", turned.heading < 0 and turned.lean > 0, true)
+local _, capped = BikeDynamics.step(
+	at(60),
+	{ throttle = 0, brake = 0, steer = 0, curvature = math.huge },
+	params,
+	1
+)
+check(
+	"an infinite look demand is capped by lookGripLimit",
+	capped.gripUsed <= params.lookGripLimit + 1e-6,
+	true
+)
+check(
+	"look demand is not limited by the keyboard assist",
+	BikeDynamics.lookCurvatureCap(40, params) > BikeDynamics.maxCurvatureAt(40, params),
+	true
+)
+check(
+	"look demand never exceeds steering lock",
+	BikeDynamics.lookCurvatureCap(1, params) <= params.maxCurvature,
+	true
+)
+local nanLook = run(at(30), { throttle = 0, brake = 0, steer = 0, curvature = 0 / 0 }, 1)
+near("nan look demand keeps straight", nanLook.heading, 0, 1e-9)
+
+-- LookSteer.fixate
+local prev = { x = 0, z = 0 }
+local raw = { x = 10, z = 0 }
+local off = LookSteer.fixate(prev, raw, true, 0, 1 / 60)
+check("fixation off follows the look exactly", off.x, 10)
+local notHazard = LookSteer.fixate(prev, raw, false, 1, 1 / 60)
+check("fixation ignores non-hazards", notHazard.x, 10)
+local sticky = LookSteer.fixate(prev, raw, true, 1, 1 / 60)
+check("fixation on a hazard lets go slowly", sticky.x > 0 and sticky.x < 1, true)
+local mild = LookSteer.fixate(prev, raw, true, 0.3, 1 / 60)
+check("stronger fixation is stickier", mild.x > sticky.x, true)
 
 -- Crash.impact / impactOverWindow / damage (kept for the part damage model)
 check("small drop is not a crash", Crash.impact(50, 45, 18), 0)

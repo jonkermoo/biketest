@@ -14,6 +14,7 @@ export type Params = {
 	gravity: number,
 	tyreGrip: number,
 	steerAssist: number,
+	lookGripLimit: number,
 	slideDecel: number,
 	lyingLean: number,
 }
@@ -28,7 +29,11 @@ export type State = {
 export type Input = {
 	throttle: number, -- 0..1
 	brake: number, -- 0..1
-	steer: number, -- -1..1, positive = right. Keyboard now, look target later.
+	steer: number, -- -1..1, positive = right. Keyboard steering, capped by the assist.
+	-- Curvature asked for by the look target (1/studs, positive = right). When present it
+	-- replaces `steer` and is NOT capped by the assist, so looking too sharply can ask for
+	-- more grip than the tyres have.
+	curvature: number?,
 }
 
 export type Events = {
@@ -49,10 +54,20 @@ function BikeDynamics.sanitize(value: any, lo: number, hi: number): number
 	return math.clamp(value, lo, hi)
 end
 
--- Tightest turn the bike can make at this speed, in 1/studs. Narrower at speed, and capped
--- so that a full-lock key press stays inside `steerAssist` of the tyre grip budget. This is
--- what makes keyboard steering safe. A look target (later) asks for curvature directly and
--- is not capped, which is how you can ask for a turn the tyres cannot hold.
+-- Tightest turn a look target may ask for: the steering lock, and `lookGripLimit` times the
+-- tyre grip. A limit above 1 means a sharp enough look really can exceed the grip and drop
+-- the bike; the cap only stops absurd demands (looking straight sideways at speed).
+function BikeDynamics.lookCurvatureCap(speed: number, params: Params): number
+	local byGrip = params.lookGripLimit
+		* params.tyreGrip
+		* params.gravity
+		/ math.max(speed * speed, 1)
+	return math.min(params.maxCurvature, byGrip)
+end
+
+-- Tightest turn a keyboard press can make at this speed, in 1/studs. Narrower at speed, and
+-- capped so that a full-lock key press stays inside `steerAssist` of the tyre grip budget.
+-- This is what makes keyboard steering safe.
 function BikeDynamics.maxCurvatureAt(speed: number, params: Params): number
 	local ratio = speed / params.curvatureSpeedRef
 	local byGeometry = params.maxCurvature / (1 + ratio * ratio)
@@ -100,7 +115,13 @@ function BikeDynamics.step(state: State, input: Input, params: Params, dt: numbe
 	local speed = math.clamp(state.speed + change * dt, 0, params.maxSpeed)
 
 	-- The rider asks for a turn; the bike leans to hold that lateral acceleration.
-	local demandedCurvature = steer * BikeDynamics.maxCurvatureAt(speed, params)
+	local demandedCurvature
+	if input.curvature ~= nil then
+		local cap = BikeDynamics.lookCurvatureCap(speed, params)
+		demandedCurvature = BikeDynamics.sanitize(input.curvature, -cap, cap)
+	else
+		demandedCurvature = steer * BikeDynamics.maxCurvatureAt(speed, params)
+	end
 	local demandedAccel = speed * speed * demandedCurvature
 	local targetLean = BikeDynamics.leanForLateralAccel(demandedAccel, params.gravity)
 	local lean = state.lean + (targetLean - state.lean) * (1 - math.exp(-params.leanRate * dt))
