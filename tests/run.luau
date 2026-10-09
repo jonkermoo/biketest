@@ -235,20 +235,23 @@ local mild = LookSteer.fixate(prev, raw, true, 0.3, 1 / 60)
 check("stronger fixation is stickier", mild.x > sticky.x, true)
 
 -- Throttle lever: -1 full brake, 0 closed, +1 full throttle
-near("a notch toward faster opens the throttle", Throttle.fromScroll(0, 1, 0.05), 0.05, 1e-9)
-near("a notch toward slower closes the throttle", Throttle.fromScroll(0.5, -1, 0.05), 0.45, 1e-9)
-near("past closed, slower starts braking", Throttle.fromScroll(0.05, -3, 0.05), -0.10, 1e-9)
-near(
-	"from braking, faster releases the brake first",
-	Throttle.fromScroll(-0.2, 2, 0.05),
-	-0.10,
-	1e-9
-)
-check("lever cannot pass full throttle", Throttle.fromScroll(0.98, 3, 0.05), 1)
-check("lever cannot pass full brake", Throttle.fromScroll(-0.98, -3, 0.05), -1)
-near("no scroll leaves it where it was", Throttle.fromScroll(0.35, 0, 0.05), 0.35, 1e-9)
-check("nan scroll leaves it where it was", Throttle.fromScroll(0.35, 0 / 0, 0.05), 0.35)
-check("nan lever is treated as closed", Throttle.fromScroll(0 / 0, 1, 0.05) > 0, true)
+local function scroll(lever: number, notches: number): number
+	return Throttle.fromScroll(lever, notches, 0.05, 0.10) -- throttle 5%, brake 10% per notch
+end
+near("a notch toward faster opens the throttle by the throttle step", scroll(0, 1), 0.05, 1e-9)
+near("a notch toward slower closes the throttle by the throttle step", scroll(0.5, -1), 0.45, 1e-9)
+near("from closed, slower brakes by the brake step", scroll(0, -1), -0.10, 1e-9)
+near("rolling off then braking: 0.05 -> closed -> two brake notches", scroll(0.05, -3), -0.20, 1e-9)
+near("from braking, faster releases by the brake step", scroll(-0.3, 1), -0.20, 1e-9)
+check("a notch stops at closed instead of crossing into brake", scroll(0.02, -1), 0)
+check("a notch stops at closed instead of crossing into throttle", scroll(-0.04, 1), 0)
+near("releasing the brake then opening the throttle", scroll(-0.1, 3), 0.10, 1e-9)
+check("lever cannot pass full throttle", scroll(0.98, 3), 1)
+check("lever cannot pass full brake", scroll(-0.95, -3), -1)
+near("no scroll leaves it where it was", scroll(0.35, 0), 0.35, 1e-9)
+check("nan scroll leaves it where it was", scroll(0.35, 0 / 0), 0.35)
+check("nan lever is treated as closed", scroll(0 / 0, 1) > 0, true)
+near("half a notch (trackpad) moves half a step", scroll(0.2, 0.5), 0.225, 1e-9)
 
 local t1, b1 = Throttle.split(0.6)
 check("positive lever is throttle only", t1 == 0.6 and b1 == 0, true)

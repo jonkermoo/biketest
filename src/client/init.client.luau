@@ -19,6 +19,8 @@ local BikeDynamics = require(Shared.rules.BikeDynamics)
 local LookSteer = require(Shared.rules.LookSteer)
 local Throttle = require(Shared.rules.Throttle)
 local LookView = require(script.LookView)
+local Settings = require(script.Settings)
+local SettingsPanel = require(script.SettingsPanel)
 local ThrottleHud = require(script.ThrottleHud)
 
 local player = Players.LocalPlayer
@@ -76,7 +78,9 @@ local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
 	local throttle, leverBrake = Throttle.split(lever)
 	local brake = math.max(leverBrake, key(Enum.KeyCode.S)) -- S is a full-brake fallback
 	local steer = key(Enum.KeyCode.D) - key(Enum.KeyCode.A)
-	if steer ~= 0 then
+	-- While the settings panel is open the mouse is for clicking, so hold straight unless
+	-- the rider steers with the keys.
+	if steer ~= 0 or SettingsPanel.isOpen() then
 		return { throttle = throttle, brake = brake, steer = steer }
 	end
 
@@ -184,8 +188,13 @@ RunService:BindToRenderStep("BikeCamera", Enum.RenderPriority.Camera.Value + 1, 
 end)
 
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
-	if not processed and input.KeyCode == Enum.KeyCode.R then
+	if processed then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.R then
 		requestRespawn:FireServer()
+	elseif input.KeyCode == Controls.settingsKey then
+		SettingsPanel.toggle()
 	end
 end)
 
@@ -196,7 +205,7 @@ UserInputService.InputChanged:Connect(function(input: InputObject, processed: bo
 		return
 	end
 	if bike and not state.fallen then
-		local notches = input.Position.Z * Controls.scrollFasterSign
-		lever = Throttle.fromScroll(lever, notches, Controls.throttleStep)
+		local notches = input.Position.Z * Settings.scrollFasterSign
+		lever = Throttle.fromScroll(lever, notches, Settings.throttleStep, Settings.brakeStep)
 	end
 end)
