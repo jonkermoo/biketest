@@ -25,10 +25,15 @@ end
 
 local params: BikeDynamics.Params = {
 	maxSpeed = 100,
-	acceleration = 20,
+	-- Simple numbers for the generic tests: constant push of 20 (power never limits it),
+	-- constant rolling drag of 10, no engine braking or air drag. The real R6 numbers are
+	-- tested against measured data further down.
+	launchAccel = 20,
+	powerPerMass = 1e9,
+	rollingResistance = 10,
+	engineBraking = 0,
+	aeroDrag = 0,
 	brakeDecel = 35,
-	drag = 10,
-	aeroDrag = 0, -- kept at 0 so speed tests are simple; air drag has its own tests below
 	maxCurvature = 0.1,
 	curvatureSpeedRef = 20,
 	leanRate = 5,
@@ -75,27 +80,78 @@ check("speed capped at max", s.speed, 100)
 s = run(at(50), { throttle = 0 / 0, brake = 0 / 0, steer = 0 / 0 }, 1)
 near("nan input behaves like no input", s.speed, 40, 0.5)
 
--- air drag: each throttle opening settles at its own cruising speed
-local aero = table.clone(params)
-aero.acceleration = 28
-aero.drag = 4
-aero.aeroDrag = 24 / 14400
-aero.maxSpeed = 1000 -- so the cap does not hide the drag balance
-local function cruise(t: number): number
+-- Real bike: the game config must reproduce MOTORRAD's measured 2005 Yamaha YZF-R6 figures.
+local R6 = require("../src/shared/config/Bike")
+local KMH = 1 / 3.6 / 0.28 -- km/h to studs/s
+local M = 1 / 0.28 -- metres to studs
+
+local function timeTo(kmh: number): number
+	local st, t, dt = BikeDynamics.newState(0), 0, 1 / 240
+	while st.speed < kmh * KMH and t < 60 do
+		st = BikeDynamics.step(st, { throttle = 1, brake = 0, steer = 0 }, R6, dt)
+		t += dt
+	end
+	return t
+end
+local function cruise(throttle: number): number
 	local st = BikeDynamics.newState(0)
-	for _ = 1, 60 * 60 do
-		st = BikeDynamics.step(st, { throttle = t, brake = 0, steer = 0 }, aero, 1 / 60)
+	for _ = 1, 240 * 90 do
+		st = BikeDynamics.step(st, { throttle = throttle, brake = 0, steer = 0 }, R6, 1 / 240)
 	end
 	return st.speed
 end
-near("full throttle settles at the designed top speed", cruise(1), 120, 0.5)
-near("half throttle cruises near 77", cruise(0.5), math.sqrt(10 / aero.aeroDrag), 0.5)
-near("quarter throttle cruises near 42", cruise(0.25), math.sqrt(3 / aero.aeroDrag), 0.5)
-check("more throttle cruises faster", cruise(0.5) > cruise(0.25), true)
-check("too little throttle to beat rolling drag stops the bike", cruise(0.1), 0)
-local fast = at(100)
-local slowed = run(fast, { throttle = 0.25, brake = 0, steer = 0 }, 0.5)
-check("rolling off the throttle at speed slows the bike", slowed.speed < 100, true)
+local function stoppingDistance(kmh: number, brake: number): number
+	local st, travelled, dt = at(kmh * KMH), 0, 1 / 1000
+	while st.speed > 0 do
+		travelled += st.speed * dt
+		st = BikeDynamics.step(st, { throttle = 0, brake = brake, steer = 0 }, R6, dt)
+	end
+	return travelled
+end
+
+near("R6: 0-100 km/h in 3.2 s (measured)", timeTo(100), 3.2, 0.1)
+near("R6: 0-140 km/h in 4.9 s (measured)", timeTo(140), 4.9, 0.15)
+near("R6: 0-200 km/h in 9.6 s (measured)", timeTo(200), 9.6, 0.3)
+near("R6: top speed 265 km/h (measured)", cruise(1) / KMH, 265, 3)
+check("R6: the safety cap does not set the top speed", cruise(1) < R6.maxSpeed - 1, true)
+near("R6: full brake 100-0 km/h in 38.5 m (measured)", stoppingDistance(100, 1) / M, 38.5, 1)
+local meanDecel = (100 / 3.6) ^ 2 / (2 * stoppingDistance(100, 1) / M)
+near("R6: mean braking deceleration 10.0 m/s^2 (measured)", meanDecel, 10.0, 0.3)
+check(
+	"R6: full braking stays under the ~1 g rear-wheel-lift limit",
+	(R6.brakeDecel + R6.engineBraking) / R6.gravity < 1.0,
+	true
+)
+check(
+	"R6: half brake stops in a longer distance",
+	stoppingDistance(100, 0.5) > stoppingDistance(100, 1),
+	true
+)
+check(
+	"R6: stopping distance grows with the square of speed",
+	stoppingDistance(140, 1) > 1.8 * stoppingDistance(100, 1),
+	true
+)
+check("R6: more throttle cruises faster", cruise(0.5) > cruise(0.25), true)
+check(
+	"R6: power fades with speed (less push at 200 than at 50 km/h)",
+	BikeDynamics.driveAccel(200 * KMH, 1, R6) < BikeDynamics.driveAccel(50 * KMH, 1, R6),
+	true
+)
+near(
+	"R6: launch limited to 0.92 g (front wheel lift)",
+	BikeDynamics.driveAccel(1, 1, R6) / R6.gravity,
+	0.92,
+	0.01
+)
+local rollOff = BikeDynamics.resistance(100 * KMH, 0, R6)
+local holding = BikeDynamics.resistance(100 * KMH, 1, R6)
+check("R6: closing the throttle adds engine braking", rollOff > holding, true)
+check(
+	"R6: resistance is zero when stopped (no rolling backwards)",
+	BikeDynamics.resistance(0, 0, R6),
+	0
+)
 
 -- straight line
 s = run(at(40), { throttle = 0.5, brake = 0, steer = 0 }, 2)

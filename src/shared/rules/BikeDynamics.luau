@@ -5,10 +5,12 @@ local BikeDynamics = {}
 
 export type Params = {
 	maxSpeed: number,
-	acceleration: number,
-	brakeDecel: number,
-	drag: number,
+	launchAccel: number, -- traction/wheelie-limited acceleration at low speed
+	powerPerMass: number, -- engine power per unit mass: drive acceleration = this / speed
+	rollingResistance: number,
+	engineBraking: number, -- deceleration from a fully closed throttle
 	aeroDrag: number,
+	brakeDecel: number,
 	maxCurvature: number,
 	curvatureSpeedRef: number,
 	leanRate: number,
@@ -89,6 +91,24 @@ function BikeDynamics.gripUsed(lateralG: number, longitudinalG: number, tyreGrip
 	return math.sqrt(lateralG * lateralG + longitudinalG * longitudinalG) / tyreGrip
 end
 
+-- Forward push from the engine. Power-limited: at low speed the bike can only use so much
+-- before the front lifts or the tyre spins (`launchAccel`); above that, a fixed power gives
+-- less acceleration the faster you go (power = force x speed).
+function BikeDynamics.driveAccel(speed: number, throttle: number, params: Params): number
+	return throttle * math.min(params.launchAccel, params.powerPerMass / math.max(speed, 1))
+end
+
+-- Everything slowing the bike apart from the brakes: rolling resistance, air drag (grows
+-- with speed squared) and engine braking, which fades in as the throttle closes.
+function BikeDynamics.resistance(speed: number, throttle: number, params: Params): number
+	if speed <= 0 then
+		return 0
+	end
+	return params.rollingResistance
+		+ params.aeroDrag * speed * speed
+		+ params.engineBraking * (1 - throttle)
+end
+
 local function stepFallen(state: State, dt: number, params: Params): State
 	local side = if state.lean >= 0 then 1 else -1
 	local lean = state.lean + (side * params.lyingLean - state.lean) * (1 - math.exp(-6 * dt))
@@ -111,11 +131,8 @@ function BikeDynamics.step(state: State, input: Input, params: Params, dt: numbe
 	local steer = BikeDynamics.sanitize(input.steer, -1, 1)
 
 	-- Speed
-	-- Engine pushes in proportion to throttle; rolling drag and air drag (speed squared)
-	-- always push back, so each throttle opening settles at its own cruising speed.
-	local change = params.acceleration * throttle
-		- params.drag
-		- params.aeroDrag * state.speed * state.speed
+	local change = BikeDynamics.driveAccel(state.speed, throttle, params)
+		- BikeDynamics.resistance(state.speed, throttle, params)
 		- params.brakeDecel * brake
 	local speed = math.clamp(state.speed + change * dt, 0, params.maxSpeed)
 
