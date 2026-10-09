@@ -1,9 +1,11 @@
 --!strict
 local BikeDynamics = require("../src/shared/rules/BikeDynamics")
 local Crash = require("../src/shared/rules/Crash")
+local Gearbox = require("../src/shared/rules/Gearbox")
 local LookSteer = require("../src/shared/rules/LookSteer")
 local Throttle = require("../src/shared/rules/Throttle")
 local Respawn = require("../src/shared/rules/Respawn")
+local RiderSettings = require("../src/shared/rules/RiderSettings")
 
 local failures = 0
 local function check(name: string, got: any, want: any)
@@ -25,15 +27,25 @@ end
 
 local params: BikeDynamics.Params = {
 	maxSpeed = 100,
-	-- Simple numbers for the generic tests: constant push of 20 (power never limits it),
-	-- constant rolling drag of 10, no engine braking or air drag. The real R6 numbers are
-	-- tested against measured data further down.
+	-- Simple numbers for the generic tests: one huge-power gear so the push is a constant 20
+	-- (the launch limit), constant rolling drag of 10, no engine braking or air drag. The
+	-- real R6 numbers are tested against measured data further down.
+	gearRatios = { 1 },
+	primaryRatio = 1,
+	finalRatio = 1,
+	wheelRadius = 1,
+	peakPowerRpm = 1e9,
+	redlineRpm = 1e12,
+	clutchSlipRpm = 1,
+	peakPowerPerMass = 1e15,
 	launchAccel = 20,
-	powerPerMass = 1e9,
-	rollingResistance = 10,
 	engineBraking = 0,
+	shiftCutTime = 0,
+	rollingResistance = 10,
 	aeroDrag = 0,
-	brakeDecel = 35,
+	frontBrakeDecel = 35,
+	rearBrakeDecel = 10,
+	maxBrakeDecel = 1e9,
 	maxCurvature = 0.1,
 	curvatureSpeedRef = 20,
 	leanRate = 5,
@@ -85,72 +97,163 @@ local R6 = require("../src/shared/config/Bike")
 local KMH = 1 / 3.6 / 0.28 -- km/h to studs/s
 local M = 1 / 0.28 -- metres to studs
 
-local function timeTo(kmh: number): number
+-- Ride with a perfect rider: full throttle, upshift at the redline. Returns the time to reach
+-- `kmh` (or the speed after `seconds` if kmh is nil).
+local function ride(kmh: number?, seconds: number, throttle: number): (number, BikeDynamics.State)
 	local st, t, dt = BikeDynamics.newState(0), 0, 1 / 240
-	while st.speed < kmh * KMH and t < 60 do
-		st = BikeDynamics.step(st, { throttle = 1, brake = 0, steer = 0 }, R6, dt)
+	while t < seconds and (kmh == nil or st.speed < kmh * KMH) do
+		-- shift up at the redline, or as soon as the next gear pulls harder
+		local atRedline = Gearbox.rpm(st.speed, st.gear, R6) >= R6.redlineRpm * 0.995
+		local nextPullsHarder = st.gear < #R6.gearRatios
+			and Gearbox.driveAccel(st.speed, 1, st.gear + 1, R6)
+				> Gearbox.driveAccel(st.speed, 1, st.gear, R6)
+		local shift = if atRedline or nextPullsHarder then 1 else 0
+		st = BikeDynamics.step(
+			st,
+			{ throttle = throttle, brake = 0, steer = 0, shift = shift },
+			R6,
+			dt
+		)
 		t += dt
 	end
-	return t
+	return t, st
 end
-local function cruise(throttle: number): number
-	local st = BikeDynamics.newState(0)
-	for _ = 1, 240 * 90 do
-		st = BikeDynamics.step(st, { throttle = throttle, brake = 0, steer = 0 }, R6, 1 / 240)
-	end
-	return st.speed
-end
-local function stoppingDistance(kmh: number, brake: number): number
+local function stoppingDistance(kmh: number, front: number, rear: number, gear: number): number
 	local st, travelled, dt = at(kmh * KMH), 0, 1 / 1000
+	st.gear = gear
 	while st.speed > 0 do
 		travelled += st.speed * dt
-		st = BikeDynamics.step(st, { throttle = 0, brake = brake, steer = 0 }, R6, dt)
+		st = BikeDynamics.step(
+			st,
+			{ throttle = 0, brake = front, rearBrake = rear, steer = 0 },
+			R6,
+			dt
+		)
 	end
 	return travelled
 end
 
-near("R6: 0-100 km/h in 3.2 s (measured)", timeTo(100), 3.2, 0.1)
-near("R6: 0-140 km/h in 4.9 s (measured)", timeTo(140), 4.9, 0.15)
-near("R6: 0-200 km/h in 9.6 s (measured)", timeTo(200), 9.6, 0.3)
-near("R6: top speed 265 km/h (measured)", cruise(1) / KMH, 265, 3)
-check("R6: the safety cap does not set the top speed", cruise(1) < R6.maxSpeed - 1, true)
-near("R6: full brake 100-0 km/h in 38.5 m (measured)", stoppingDistance(100, 1) / M, 38.5, 1)
-local meanDecel = (100 / 3.6) ^ 2 / (2 * stoppingDistance(100, 1) / M)
+near("R6: 0-100 km/h in 3.2 s (measured)", (ride(100, 60, 1)), 3.2, 0.1)
+near("R6: 0-140 km/h in 4.9 s (measured)", (ride(140, 60, 1)), 4.9, 0.15)
+near("R6: 0-200 km/h in 9.6 s (measured)", (ride(200, 60, 1)), 9.6, 0.3)
+local _, flatOut = ride(nil, 90, 1)
+near("R6: top speed 265 km/h (measured)", flatOut.speed / KMH, 265, 3)
+check("R6: the safety cap does not set the top speed", flatOut.speed < R6.maxSpeed - 1, true)
+check("R6: top speed is reached in 6th", flatOut.gear, 6)
+near(
+	"R6: full front brake 100-0 km/h in 2nd: 38.5 m (measured)",
+	stoppingDistance(100, 1, 0, 2) / M,
+	38.5,
+	1
+)
+local meanDecel = (100 / 3.6) ^ 2 / (2 * stoppingDistance(100, 1, 0, 2) / M)
 near("R6: mean braking deceleration 10.0 m/s^2 (measured)", meanDecel, 10.0, 0.3)
 check(
-	"R6: full braking stays under the ~1 g rear-wheel-lift limit",
-	(R6.brakeDecel + R6.engineBraking) / R6.gravity < 1.0,
-	true
-)
-check(
 	"R6: half brake stops in a longer distance",
-	stoppingDistance(100, 0.5) > stoppingDistance(100, 1),
+	stoppingDistance(100, 0.5, 0, 2) > stoppingDistance(100, 1, 0, 2),
 	true
 )
 check(
 	"R6: stopping distance grows with the square of speed",
-	stoppingDistance(140, 1) > 1.8 * stoppingDistance(100, 1),
+	stoppingDistance(140, 1, 0, 3) > 1.8 * stoppingDistance(100, 1, 0, 2),
 	true
 )
-check("R6: more throttle cruises faster", cruise(0.5) > cruise(0.25), true)
 check(
-	"R6: power fades with speed (less push at 200 than at 50 km/h)",
-	BikeDynamics.driveAccel(200 * KMH, 1, R6) < BikeDynamics.driveAccel(50 * KMH, 1, R6),
+	"R6: power fades with speed in a gear (less push at 150 than at 100 km/h in 2nd)",
+	BikeDynamics.driveAccel(150 * KMH, 1, 2, R6) < BikeDynamics.driveAccel(100 * KMH, 1, 2, R6),
 	true
 )
 near(
 	"R6: launch limited to 0.92 g (front wheel lift)",
-	BikeDynamics.driveAccel(1, 1, R6) / R6.gravity,
+	BikeDynamics.driveAccel(1, 1, 1, R6) / R6.gravity,
 	0.92,
 	0.01
 )
-local rollOff = BikeDynamics.resistance(100 * KMH, 0, R6)
-local holding = BikeDynamics.resistance(100 * KMH, 1, R6)
-check("R6: closing the throttle adds engine braking", rollOff > holding, true)
+check(
+	"R6: closing the throttle adds engine braking",
+	BikeDynamics.resistance(100 * KMH, 0, 2, R6) > BikeDynamics.resistance(100 * KMH, 1, 2, R6),
+	true
+)
 check(
 	"R6: resistance is zero when stopped (no rolling backwards)",
-	BikeDynamics.resistance(0, 0, R6),
+	BikeDynamics.resistance(0, 0, 1, R6),
 	0
+)
+
+-- Gearbox
+local function gearTopSpeed(gear: number): number
+	return R6.redlineRpm / Gearbox.rpm(1, gear, R6) / KMH
+end
+near("R6: 1st gear runs out at about 110 km/h", gearTopSpeed(1), 110, 2)
+near("R6: 2nd gear runs out at about 161 km/h", gearTopSpeed(2), 161, 2)
+check(
+	"R6: each gear is taller than the last",
+	gearTopSpeed(3) > gearTopSpeed(2) and gearTopSpeed(6) > gearTopSpeed(5),
+	true
+)
+near("R6: about 14,200 rpm at 265 km/h in 6th", Gearbox.rpm(265 * KMH, 6, R6), 14200, 150)
+check("R6: no drive at the rev limiter", Gearbox.driveAccel(115 * KMH, 1, 1, R6), 0)
+check(
+	"R6: 6th gear pulls much weaker than 2nd at 80 km/h",
+	Gearbox.driveAccel(80 * KMH, 1, 6, R6) < 0.6 * Gearbox.driveAccel(80 * KMH, 1, 2, R6),
+	true
+)
+check(
+	"R6: a lower gear gives more engine braking",
+	Gearbox.engineBraking(80 * KMH, 0, 2, R6) > Gearbox.engineBraking(80 * KMH, 0, 5, R6),
+	true
+)
+check("R6: no engine braking with the throttle open", Gearbox.engineBraking(80 * KMH, 1, 2, R6), 0)
+local g1, ok1s = Gearbox.shift(3, 1, 100 * KMH, R6)
+check("upshift goes up one gear", g1 == 4 and ok1s, true)
+local g2, ok2s = Gearbox.shift(6, 1, 100 * KMH, R6)
+check("no gear above top", g2 == 6 and not ok2s, true)
+local g3, ok3s = Gearbox.shift(1, -1, 10 * KMH, R6)
+check("no gear below 1st", g3 == 1 and not ok3s, true)
+local g4, ok4s = Gearbox.shift(3, -1, 170 * KMH, R6)
+check("a downshift that would over-rev is refused", g4 == 3 and not ok4s, true)
+local g5, ok5s = Gearbox.shift(3, -1, 100 * KMH, R6)
+check("a safe downshift goes through", g5 == 2 and ok5s, true)
+local cutState = at(60 * KMH)
+cutState.gear = 2
+local afterShift, shiftEvents =
+	BikeDynamics.step(cutState, { throttle = 1, brake = 0, steer = 0, shift = 1 }, R6, 1 / 240)
+check("shifting up reports the shift", shiftEvents.shifted and afterShift.gear == 3, true)
+check("an upshift briefly cuts the drive", afterShift.shiftCut > 0, true)
+local _, refused = BikeDynamics.step(
+	at(150 * KMH),
+	{ throttle = 0, brake = 0, steer = 0, shift = -1 },
+	R6,
+	1 / 240
+)
+check("a refused downshift is reported", refused.shiftRefused, true)
+
+-- Brakes: front, rear, combined
+check(
+	"rear brake alone is far weaker than the front",
+	R6.rearBrakeDecel < 0.5 * R6.frontBrakeDecel,
+	true
+)
+check(
+	"rear alone stops in a much longer distance",
+	stoppingDistance(100, 0, 1, 2) > 2 * stoppingDistance(100, 1, 0, 2),
+	true
+)
+check(
+	"adding rear brake to full front helps only a little (pitch-over cap)",
+	stoppingDistance(100, 1, 1, 2) > 0.95 * stoppingDistance(100, 1, 0, 2),
+	true
+)
+near(
+	"front and rear together are capped at 0.98 g",
+	BikeDynamics.brakeDecel(1, 1, R6) / R6.gravity,
+	0.98,
+	1e-6
+)
+check(
+	"partial front plus rear adds up below the cap",
+	BikeDynamics.brakeDecel(0.3, 0.5, R6) < R6.maxBrakeDecel,
+	true
 )
 
 -- straight line
@@ -344,6 +447,107 @@ check("payload blocks respawn", ok4, false)
 check("payload reason", why4, "unexpected payload")
 local ok5 = Respawn.check(0, 10, -math.huge, 3)
 check("first respawn always allowed", ok5, true)
+
+-- RiderSettings: defaults, ranges, bindings
+local d = RiderSettings.defaults()
+check("default upshift is R", d.bindings.upshift, "R")
+check("default downshift is E", d.bindings.downshift, "E")
+check("default threshold brake is left click", d.bindings.thresholdBrake, "MouseButton1")
+check("default rear brake is right click", d.bindings.rearBrake, "MouseButton2")
+check("respawn moved off R", d.bindings.respawn ~= "R", true)
+local d2 = RiderSettings.defaults()
+d2.bindings.upshift = "T"
+check("defaults are fresh copies", RiderSettings.defaults().bindings.upshift, "R")
+
+local clean = RiderSettings.sanitize({
+	throttleStep = 0.123,
+	brakeStep = 5,
+	thresholdBrake = -1,
+	rearBrakeGrowth = 0 / 0,
+	scrollFasterSign = 7,
+	hacked = "yes",
+	bindings = { upshift = "Q", downshift = "Escape", respawn = 42 },
+})
+near("values snap to their increment", clean.throttleStep, 0.12, 1e-9)
+check("values above range clamp to max", clean.brakeStep, 0.25)
+check("values below range clamp to min", clean.thresholdBrake, 0.05)
+check("nan falls back to the default", clean.rearBrakeGrowth, 2.5)
+check("invalid scroll sign falls back to default", clean.scrollFasterSign, 1)
+check("unknown fields are dropped", (clean :: any).hacked, nil)
+check("a valid binding is kept", clean.bindings.upshift, "Q")
+check("a Roblox-reserved key is refused", clean.bindings.downshift, "E")
+check("a non-string binding is refused", clean.bindings.respawn, "Backspace")
+check("steering keys cannot be bound", RiderSettings.isBindable("A"), false)
+check("mouse buttons can be bound", RiderSettings.isBindable("MouseButton2"), true)
+check("garbage becomes defaults", RiderSettings.sanitize("nope").throttleStep, 0.05)
+
+local dup = RiderSettings.sanitize({ bindings = { upshift = "R", downshift = "R" } })
+check("duplicate binding: first keeps it", dup.bindings.upshift, "R")
+check("duplicate binding: second is unbound", dup.bindings.downshift, "None")
+
+local swapped = RiderSettings.rebind(d.bindings, "upshift", "E")
+check("rebinding to a used key gives it to the new action", swapped.upshift, "E")
+check("the other action takes the old key", swapped.downshift, "R")
+check("rebind does not change the original", d.bindings.upshift, "R")
+local reservedKey = RiderSettings.rebind(d.bindings, "upshift", "Escape")
+check("rebinding to a reserved key is ignored", reservedKey.upshift, "R")
+local fresh = RiderSettings.rebind(d.bindings, "respawn", "X")
+check("rebinding to a free key just sets it", fresh.respawn, "X")
+
+-- profiles
+local p = RiderSettings.sanitizeProfiles(nil)
+check("no data gives 5 slots", #p.slots, 5)
+check("no data makes profile 1 active", p.active, 1)
+check("the active slot always has settings", type(p.slots[1]), "table")
+check("other slots start empty", p.slots[2], false)
+local p2 = RiderSettings.sanitizeProfiles({
+	active = 9,
+	slots = { false, { throttleStep = 0.2 }, "x", false, false, {}, {} },
+})
+check("an out-of-range active slot resets to 1", p2.active, 1)
+check("only 5 slots are kept", #p2.slots, 5)
+check("a stored profile is sanitized", (p2.slots[2] :: any).throttleStep, 0.2)
+check("a junk slot becomes empty", p2.slots[3], false)
+local p3 =
+	RiderSettings.sanitizeProfiles({ active = 4, slots = { false, false, false, false, false } })
+check("an empty active slot is filled with defaults", type(p3.slots[4]), "table")
+
+-- rear brake grows exponentially while held, and releases instantly
+check("rear brake is off when not held", RiderSettings.rearBrakePressure(nil, 0.05, 2.5), 0)
+near(
+	"rear brake starts at the start pressure",
+	RiderSettings.rearBrakePressure(0, 0.05, 2.5),
+	0.05,
+	1e-9
+)
+near(
+	"rear brake grows exponentially",
+	RiderSettings.rearBrakePressure(0.5, 0.05, 2.5),
+	0.05 * math.exp(1.25),
+	1e-9
+)
+check(
+	"rear brake doubles in a fixed time (exponential)",
+	math.abs(
+		RiderSettings.rearBrakePressure(0.3, 0.05, 2)
+				/ RiderSettings.rearBrakePressure(0.1, 0.05, 2)
+			- math.exp(0.4)
+	) < 1e-9,
+	true
+)
+check("rear brake never exceeds full", RiderSettings.rearBrakePressure(30, 0.05, 2.5), 1)
+check(
+	"faster growth reaches full sooner",
+	RiderSettings.rearBrakeTimeToFull(0.05, 5) < RiderSettings.rearBrakeTimeToFull(0.05, 2.5),
+	true
+)
+near(
+	"time to full at defaults",
+	RiderSettings.rearBrakeTimeToFull(0.05, 2.5),
+	math.log(20) / 2.5,
+	1e-9
+)
+check("nan hold time is off", RiderSettings.rearBrakePressure(0 / 0, 0.05, 2.5), 0)
 
 if failures > 0 then
 	error(`{failures} test(s) failed`)

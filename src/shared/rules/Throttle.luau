@@ -6,7 +6,7 @@
 local Throttle = {}
 
 -- New lever position after a scroll. `notches` is positive for "faster" and negative for
--- "slower"; the client maps the mouse wheel's direction onto that (see config/Controls).
+-- "slower"; the client maps the mouse wheel's direction onto that (see the rider's settings).
 -- The throttle side moves `throttleStep` per notch and the brake side `brakeStep`. A notch
 -- never crosses closed: it stops at 0, so there is always one click between throttle and
 -- brake and you cannot brake by accident while rolling off.

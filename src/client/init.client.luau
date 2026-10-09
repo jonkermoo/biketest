@@ -1,8 +1,8 @@
 --!strict
--- Drives the rider's bike: reads input, turns the look marker into a steering demand, steps
--- the pure riding model, follows the ground with raycasts under each wheel, and places the
--- bike through its align constraints. The client owns the bike's physics, so the position
--- replicates to the server and to other players.
+-- Drives the rider's bike: reads input (mouse wheel lever, brakes, gears, look steering),
+-- steps the pure riding model, follows the ground with raycasts under each wheel, and places
+-- the bike. The client owns the bike's physics, so the position replicates to the server and
+-- to other players. Controls come from the rider's settings (rebindable in the panel).
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -13,10 +13,10 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Remotes = require(Shared:WaitForChild("Remotes"))
 local Bike = require(Shared.config.Bike)
 local Geometry = require(Shared.config.BikeGeometry)
-local Controls = require(Shared.config.Controls)
 local Look = require(Shared.config.Look)
 local BikeDynamics = require(Shared.rules.BikeDynamics)
 local LookSteer = require(Shared.rules.LookSteer)
+local RiderSettings = require(Shared.rules.RiderSettings)
 local Throttle = require(Shared.rules.Throttle)
 local LookView = require(script.LookView)
 local Settings = require(script.Settings)
@@ -25,6 +25,8 @@ local ThrottleHud = require(script.ThrottleHud)
 
 local player = Players.LocalPlayer
 local requestRespawn = ReplicatedStorage:WaitForChild(Remotes.RequestRespawn) :: RemoteEvent
+
+task.spawn(Settings.load)
 
 local function key(code: Enum.KeyCode): number
 	return if UserInputService:IsKeyDown(code) then 1 else 0
@@ -51,6 +53,10 @@ local position = Vector3.zero
 local lookTarget = { x = 0, z = 0 }
 -- Mouse-wheel lever: -1 full brake, 0 closed, +1 full throttle. Stays where it is left.
 local lever = 0
+-- Gear change asked for since the last frame: +1 up, -1 down.
+local pendingShift = 0
+-- When the rear brake input went down (nil while released).
+local rearHeldSince: number? = nil
 
 local function groundHeight(at: Vector3, fallback: number): number
 	local hit = Workspace:Raycast(at + Vector3.new(0, 6, 0), Vector3.new(0, -40, 0), groundParams)
@@ -66,22 +72,48 @@ local function attach(model: Model)
 	local _, yaw, _ = start:ToEulerAnglesYXZ()
 	state = BikeDynamics.newState(yaw)
 	lever = 0
+	pendingShift = 0
+	rearHeldSince = nil
 	local ignore = { model, player.Character :: Model } :: { Instance }
 	groundParams.FilterDescendantsInstances = ignore
 	LookView.enable(ignore)
 	ThrottleHud.setVisible(true)
 end
 
+-- Brakes: the wheel lever, the threshold brake (held = a set %), and the full-brake key all
+-- work the front brake; the strongest wins. The rear brake builds up exponentially while held
+-- and lets go the moment it is released.
+local function readBrakes(): (number, number)
+	local s = Settings.current
+	local _, leverBrake = Throttle.split(lever)
+	if SettingsPanel.isOpen() then
+		rearHeldSince = nil
+		return leverBrake, 0 -- the mouse buttons are clicking the panel
+	end
+	local threshold = if Settings.isHeld("thresholdBrake") then s.thresholdBrake else 0
+	local full = if Settings.isHeld("fullBrake") then 1 else 0
+	local front = math.max(leverBrake, threshold, full)
+
+	if rearHeldSince and not Settings.isHeld("rearBrake") then
+		rearHeldSince = nil -- released (even if the release event was missed)
+	end
+	local held = if rearHeldSince then os.clock() - rearHeldSince else nil
+	local rear = RiderSettings.rearBrakePressure(held, s.rearBrakeStart, s.rearBrakeGrowth)
+	return front, rear
+end
+
 -- Steering demand: A/D override with assisted keyboard steering; otherwise steer to the
 -- world marker, uncapped by the assist.
 local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
-	local throttle, leverBrake = Throttle.split(lever)
-	local brake = math.max(leverBrake, key(Enum.KeyCode.S)) -- S is a full-brake fallback
+	local throttle = Throttle.split(lever)
+	local front, rear = readBrakes()
+	local shift = pendingShift
+	pendingShift = 0
 	local steer = key(Enum.KeyCode.D) - key(Enum.KeyCode.A)
 	-- While the settings panel is open the mouse is for clicking, so hold straight unless
 	-- the rider steers with the keys.
 	if steer ~= 0 or SettingsPanel.isOpen() then
-		return { throttle = throttle, brake = brake, steer = steer }
+		return { throttle = throttle, brake = front, rearBrake = rear, steer = steer, shift = shift }
 	end
 
 	local look = LookView.updateLook()
@@ -96,9 +128,11 @@ local function readInput(yaw: CFrame, dt: number): BikeDynamics.Input
 	end
 	return {
 		throttle = throttle,
-		brake = brake,
+		brake = front,
+		rearBrake = rear,
 		steer = 0,
 		curvature = LookSteer.curvatureTo(lateral, forward),
+		shift = shift,
 	}
 end
 
@@ -129,14 +163,33 @@ RunService.Heartbeat:Connect(function(dt: number)
 	state, events = BikeDynamics.step(state, input, Bike, dt)
 	if state.fallen then
 		lever = 0 -- the engine cuts and the rider lets go when the bike goes down
+		rearHeldSince = nil
 	end
-	ThrottleHud.update(input.throttle, input.brake, state.speed)
+	ThrottleHud.update({
+		throttle = input.throttle,
+		front = input.brake,
+		rear = input.rearBrake or 0,
+		speed = state.speed,
+		gear = state.gear,
+		rpm = events.rpm,
+		redline = Bike.redlineRpm,
+		rpmScale = 17000,
+	})
 	if events.lostGrip then
 		print(
 			string.format(
 				"[bike] lost grip at %.0f studs/s, lean %.0f deg",
 				state.speed,
 				math.deg(state.lean)
+			)
+		)
+	end
+	if events.shiftRefused and (input.shift or 0) < 0 then
+		print(
+			string.format(
+				"[bike] downshift refused: would over-rev (%.0f km/h in gear %d)",
+				state.speed * 1.008,
+				state.gear
 			)
 		)
 	end
@@ -168,7 +221,7 @@ RunService.Heartbeat:Connect(function(dt: number)
 		end
 	end
 
-	-- Debug readout for tests and a future HUD.
+	-- Debug readout for tests.
 	bike:SetAttribute("Speed", state.speed)
 	bike:SetAttribute("LeanDeg", math.deg(state.lean))
 	bike:SetAttribute("GripUsed", events.gripUsed)
@@ -176,6 +229,9 @@ RunService.Heartbeat:Connect(function(dt: number)
 	bike:SetAttribute("LookCurvature", input.curvature or 0)
 	bike:SetAttribute("Throttle", input.throttle)
 	bike:SetAttribute("Brake", input.brake)
+	bike:SetAttribute("RearBrake", input.rearBrake or 0)
+	bike:SetAttribute("Gear", state.gear)
+	bike:SetAttribute("Rpm", events.rpm)
 end)
 
 -- Camera every rendered frame, from the bike as drawn (after physics), so the head stays
@@ -188,24 +244,47 @@ RunService:BindToRenderStep("BikeCamera", Enum.RenderPriority.Camera.Value + 1, 
 end)
 
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
-	if processed then
+	if processed or Settings.capturing then
+		return -- typing in chat, clicking UI, or choosing a new binding
+	end
+	if Settings.matches("settings", input) then
+		SettingsPanel.toggle()
 		return
 	end
-	if input.KeyCode == Enum.KeyCode.R then
+	if SettingsPanel.isOpen() or not bike then
+		return
+	end
+	if Settings.matches("upshift", input) then
+		pendingShift = 1
+	elseif Settings.matches("downshift", input) then
+		pendingShift = -1
+	elseif Settings.matches("respawn", input) then
 		requestRespawn:FireServer()
-	elseif input.KeyCode == Controls.settingsKey then
-		SettingsPanel.toggle()
+	elseif Settings.matches("rearBrake", input) then
+		rearHeldSince = os.clock()
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input: InputObject)
+	if Settings.matches("rearBrake", input) then
+		rearHeldSince = nil -- the rear brake lets go instantly
 	end
 end)
 
 -- The wheel moves one lever: toward "faster" releases the brake then opens the throttle;
--- toward "slower" closes the throttle then brakes. Direction is set in config/Controls.
+-- toward "slower" closes the throttle then brakes. Direction and step sizes come from the
+-- rider's settings.
 UserInputService.InputChanged:Connect(function(input: InputObject, processed: boolean)
 	if processed or input.UserInputType ~= Enum.UserInputType.MouseWheel then
 		return
 	end
 	if bike and not state.fallen then
-		local notches = input.Position.Z * Settings.scrollFasterSign
-		lever = Throttle.fromScroll(lever, notches, Settings.throttleStep, Settings.brakeStep)
+		local s = Settings.current
+		lever = Throttle.fromScroll(
+			lever,
+			input.Position.Z * s.scrollFasterSign,
+			s.throttleStep,
+			s.brakeStep
+		)
 	end
 end)

@@ -1,16 +1,22 @@
 --!strict
--- Pure riding model: speed, steering, lean, grip and falling. No Roblox objects, so it runs
--- under Lune in tests. The Roblox side only reads the new state and moves the model.
+-- Pure riding model: speed, gears, brakes, steering, lean, grip and falling. No Roblox
+-- objects, so it runs under Lune in tests. The Roblox side only reads the new state and moves
+-- the model.
+-- In Roblox, modules are required by instance; under Lune (tests) by path.
+local Gearbox = if typeof(script) == "Instance"
+	then require(script.Parent.Gearbox)
+	else require("./Gearbox")
+
 local BikeDynamics = {}
 
-export type Params = {
+export type Params = Gearbox.Params & {
 	maxSpeed: number,
-	launchAccel: number, -- traction/wheelie-limited acceleration at low speed
-	powerPerMass: number, -- engine power per unit mass: drive acceleration = this / speed
 	rollingResistance: number,
-	engineBraking: number, -- deceleration from a fully closed throttle
 	aeroDrag: number,
-	brakeDecel: number,
+	shiftCutTime: number, -- no drive for this long after an upshift
+	frontBrakeDecel: number, -- full front lever
+	rearBrakeDecel: number, -- full rear pedal
+	maxBrakeDecel: number, -- both together cannot exceed this (rear wheel lifts)
 	maxCurvature: number,
 	curvatureSpeedRef: number,
 	leanRate: number,
@@ -27,26 +33,33 @@ export type State = {
 	heading: number, -- radians, yaw
 	lean: number, -- radians, positive = leaning right
 	fallen: boolean,
+	gear: number, -- 1..top
+	shiftCut: number, -- seconds of upshift power cut left
 }
 
 export type Input = {
 	throttle: number, -- 0..1
-	brake: number, -- 0..1
+	brake: number, -- 0..1, front brake
+	rearBrake: number?, -- 0..1
 	steer: number, -- -1..1, positive = right. Keyboard steering, capped by the assist.
 	-- Curvature asked for by the look target (1/studs, positive = right). When present it
 	-- replaces `steer` and is NOT capped by the assist, so looking too sharply can ask for
 	-- more grip than the tyres have.
 	curvature: number?,
+	shift: number?, -- +1 upshift, -1 downshift, this frame only
 }
 
 export type Events = {
 	lostGrip: boolean,
 	gripUsed: number, -- 0..1+, how much of the tyre grip budget is in use
 	lateralG: number,
+	rpm: number,
+	shifted: boolean,
+	shiftRefused: boolean,
 }
 
 function BikeDynamics.newState(heading: number): State
-	return { speed = 0, heading = heading, lean = 0, fallen = false }
+	return { speed = 0, heading = heading, lean = 0, fallen = false, gear = 1, shiftCut = 0 }
 end
 
 -- Clamp to [lo, hi]; NaN and non-numbers become 0.
@@ -91,22 +104,40 @@ function BikeDynamics.gripUsed(lateralG: number, longitudinalG: number, tyreGrip
 	return math.sqrt(lateralG * lateralG + longitudinalG * longitudinalG) / tyreGrip
 end
 
--- Forward push from the engine. Power-limited: at low speed the bike can only use so much
--- before the front lifts or the tyre spins (`launchAccel`); above that, a fixed power gives
--- less acceleration the faster you go (power = force x speed).
-function BikeDynamics.driveAccel(speed: number, throttle: number, params: Params): number
-	return throttle * math.min(params.launchAccel, params.powerPerMass / math.max(speed, 1))
+-- Forward push from the engine in the current gear (see Gearbox).
+function BikeDynamics.driveAccel(
+	speed: number,
+	throttle: number,
+	gear: number,
+	params: Params
+): number
+	return Gearbox.driveAccel(speed, throttle, gear, params)
 end
 
 -- Everything slowing the bike apart from the brakes: rolling resistance, air drag (grows
--- with speed squared) and engine braking, which fades in as the throttle closes.
-function BikeDynamics.resistance(speed: number, throttle: number, params: Params): number
+-- with speed squared) and engine braking, which depends on gear and throttle.
+function BikeDynamics.resistance(
+	speed: number,
+	throttle: number,
+	gear: number,
+	params: Params
+): number
 	if speed <= 0 then
 		return 0
 	end
 	return params.rollingResistance
 		+ params.aeroDrag * speed * speed
-		+ params.engineBraking * (1 - throttle)
+		+ Gearbox.engineBraking(speed, throttle, gear, params)
+end
+
+-- Deceleration from the brakes. Front and rear add up, but together they cannot exceed the
+-- point where the rear wheel lifts (`maxBrakeDecel`), so adding rear brake to a full front
+-- brake only helps a little, as on a real sportbike.
+function BikeDynamics.brakeDecel(front: number, rear: number, params: Params): number
+	return math.min(
+		front * params.frontBrakeDecel + rear * params.rearBrakeDecel,
+		params.maxBrakeDecel
+	)
 end
 
 local function stepFallen(state: State, dt: number, params: Params): State
@@ -117,23 +148,50 @@ local function stepFallen(state: State, dt: number, params: Params): State
 		heading = state.heading,
 		lean = lean,
 		fallen = true,
+		gear = state.gear,
+		shiftCut = 0,
 	}
 end
 
 -- Advance the bike by one frame. Returns the new state and what happened this frame.
 function BikeDynamics.step(state: State, input: Input, params: Params, dt: number): (State, Events)
 	if state.fallen then
-		return stepFallen(state, dt, params), { lostGrip = false, gripUsed = 0, lateralG = 0 }
+		local rpm = Gearbox.rpm(state.speed, state.gear, params)
+		return stepFallen(state, dt, params),
+			{
+				lostGrip = false,
+				gripUsed = 0,
+				lateralG = 0,
+				rpm = rpm,
+				shifted = false,
+				shiftRefused = false,
+			}
 	end
 
 	local throttle = BikeDynamics.sanitize(input.throttle, 0, 1)
 	local brake = BikeDynamics.sanitize(input.brake, 0, 1)
+	local rearBrake = BikeDynamics.sanitize(input.rearBrake, 0, 1)
 	local steer = BikeDynamics.sanitize(input.steer, -1, 1)
 
+	-- Gears
+	local gear = math.clamp(math.floor(state.gear), 1, #params.gearRatios)
+	local shiftCut = math.max(state.shiftCut - dt, 0)
+	local shifted, shiftRefused = false, false
+	local shiftInput = BikeDynamics.sanitize(input.shift, -1, 1)
+	if shiftInput ~= 0 then
+		gear, shifted = Gearbox.shift(gear, shiftInput, state.speed, params)
+		shiftRefused = not shifted
+		if shifted and shiftInput > 0 then
+			shiftCut = params.shiftCutTime
+		end
+	end
+
 	-- Speed
-	local change = BikeDynamics.driveAccel(state.speed, throttle, params)
-		- BikeDynamics.resistance(state.speed, throttle, params)
-		- params.brakeDecel * brake
+	local drive = if shiftCut > 0
+		then 0
+		else BikeDynamics.driveAccel(state.speed, throttle, gear, params)
+	local braking = BikeDynamics.brakeDecel(brake, rearBrake, params)
+	local change = drive - BikeDynamics.resistance(state.speed, throttle, gear, params) - braking
 	local speed = math.clamp(state.speed + change * dt, 0, params.maxSpeed)
 
 	-- The rider asks for a turn; the bike leans to hold that lateral acceleration.
@@ -156,12 +214,27 @@ function BikeDynamics.step(state: State, input: Input, params: Params, dt: numbe
 
 	-- Grip: cornering plus braking share one budget.
 	local lateralG = math.abs(lateralAccel) / params.gravity
-	local longitudinalG = (params.brakeDecel * brake) / params.gravity
+	local longitudinalG = braking / params.gravity
 	local used = BikeDynamics.gripUsed(lateralG, longitudinalG, params.tyreGrip)
 	local lostGrip = used > 1
 
-	local newState: State = { speed = speed, heading = heading, lean = lean, fallen = lostGrip }
-	return newState, { lostGrip = lostGrip, gripUsed = used, lateralG = lateralG }
+	local newState: State = {
+		speed = speed,
+		heading = heading,
+		lean = lean,
+		fallen = lostGrip,
+		gear = gear,
+		shiftCut = shiftCut,
+	}
+	return newState,
+		{
+			lostGrip = lostGrip,
+			gripUsed = used,
+			lateralG = lateralG,
+			rpm = Gearbox.rpm(speed, gear, params),
+			shifted = shifted,
+			shiftRefused = shiftRefused,
+		}
 end
 
 return BikeDynamics

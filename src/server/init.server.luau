@@ -11,6 +11,9 @@ local Remotes = require(Shared:WaitForChild("Remotes"))
 local Bike = require(Shared.config.Bike)
 local Respawn = require(Shared.rules.Respawn)
 local BikeFactory = require(script.BikeFactory)
+local RiderProfiles = require(script.RiderProfiles)
+
+RiderProfiles.start()
 
 Players.CharacterAutoLoads = false
 
